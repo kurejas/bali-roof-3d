@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sibang villa v1 — rooftop deck</title>
+<style>
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfcdc4;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+
+/* ---------- renderer / scene (pattern from building-3d-widget) ---------- */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+let pixelRatio = Math.min(devicePixelRatio, 2);
+renderer.setPixelRatio(pixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // VSM smeared into hard grey blocks at the frustum edge
+renderer.shadowMap.autoUpdate = false;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#cfcdc4'); // = the ground's rendered pixel, so there's no horizon line
+
+const camera = new THREE.PerspectiveCamera(32, 1, 0.5, 400);
+camera.position.set(-22, 24, 32);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(1, 1.5, -1);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 12;
+controls.maxDistance = 120;
+controls.minPolarAngle = 0.05;
+controls.maxPolarAngle = 1.45;
+controls.rotateSpeed = 0.7;
+
+/* ---------- light: soft sky + one warm sun ---------- */
+scene.add(new THREE.HemisphereLight(0xf2f6ff, 0xb8b29c, 1.25));
+const sun = new THREE.DirectionalLight(0xfff1dc, 1.9);
+sun.position.set(-18, 40, 26);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 140 });
+sun.shadow.bias = -0.0008;
+sun.shadow.normalBias = 0.02;
+sun.target.position.set(1, 0, -1);
+scene.add(sun, sun.target);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: '#dcdccf', polygonOffset: true, polygonOffsetFactor: 6, polygonOffsetUnits: 6 }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = -0.01; ground.receiveShadow = true; scene.add(ground);
+
+/* ---------- line-model primitives ---------- */
+// flat colours, one material per hex; polygonOffset keeps the edge lines on top
+const COL = {
+  wall: '#f3f0e9', floor: '#e7e1d5', soffit: '#a96b3e', terrace: '#ddd5c4', stone: '#d8c7a4', lawn: '#86a35e',
+  coping: '#e6dfd0', water: '#5fb8a8', deck: '#4b403a', door: '#b8773f', frame: '#2a2a2c', glass: '#7d939b',
+  breeze: '#55585c', paver: '#a7a298', fence: '#7a6c5a', cushion: '#ece5d6',
+  play: '#c19364', rail: '#cfe6ee', tramp: '#26302f', trampRim: '#2f8f5b', sail: '#f7f1e6', slide: '#e8743b', steel: '#3b3b3d',
+  trunk: '#8b7a63', palm: '#5f8b40', leaf: '#4f8a3a',
+};
+const mats = {};
+function F(hex, extra = {}) {
+  const k = hex + JSON.stringify(extra);
+  return mats[k] ||= new THREE.MeshLambertMaterial({ color: hex, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, ...extra });
+}
+const FACE = F(COL.wall);
+// LineBasicMaterial ignores linewidth in WebGL, so edges use screen-space fat lines (px)
+const LINE = new LineMaterial({ color: 0x1a1a1a, linewidth: 1.2, transparent: true, opacity: 0.8 });
+const LINE_SOFT = new LineMaterial({ color: 0x1a1a1a, linewidth: 0.8, transparent: true, opacity: 0.35 });
+const model = new THREE.Group(); scene.add(model);
+
+function solid(geo, parent = model, { cast = true, lines = LINE, angle = 20, color = COL.wall, mat } = {}) {
+  const m = new THREE.Mesh(geo, mat || F(color)); m.castShadow = cast; m.receiveShadow = true; parent.add(m);
+  if (lines) parent.add(new LineSegments2(new LineSegmentsGeometry().fromEdgesGeometry(new THREE.EdgesGeometry(geo, angle)), lines));
+  return m;
+}
+// flat coloured patch on the ground (lawn, terraces, stones)
+function fill(x0, x1, z0, z1, y, color, parent = model) {
+  const g = new THREE.PlaneGeometry(x1 - x0, z1 - z0); g.rotateX(-Math.PI / 2); g.translate((x0 + x1) / 2, y, (z0 + z1) / 2);
+  const m = new THREE.Mesh(g, F(color)); m.receiveShadow = true; parent.add(m); return m;
+}
+function box(x0, x1, y0, y1, z0, z1, parent, opts) {
+  const g = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+  g.translate((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  return solid(g, parent, opts);
+}
+function polyline(pts, parent = model, mat = LINE, closed = false) {
+  const v = pts.map(p => new THREE.Vector3(...p)); if (closed) v.push(v[0].clone());
+  const g = new LineGeometry(); g.setPositions(v.flatMap(p => [p.x, p.y, p.z]));
+  const l = new Line2(g, mat); l.computeLineDistances(); parent.add(l); return l;
+}
+const rect = (x0, x1, z0, z1, y, parent, mat) => polyline([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], parent, mat, true);
+// extrude a world-XZ outline upward (shape uses x, -z)
+function slab(pts, y0, h, parent = model, opts) {
+  const s = new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const g = new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: 24 });
+  g.rotateX(-Math.PI / 2); g.translate(0, y0, 0); return solid(g, parent, opts);
+}
+function roundCorner(pts, i, r, seg = 16) {
+  const out = [], n = pts.length;
+  pts.forEach((p, k) => {
+    if (k !== i) { out.push(p); return; }
+    const u = (a, b) => { const l = Math.hypot(b[0] - a[0], b[1] - a[1]); return [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; };
+    const d1 = u(p, pts[(k - 1 + n) % n]), d2 = u(p, pts[(k + 1) % n]);
+    const c = [p[0] + (d1[0] + d2[0]) * r, p[1] + (d1[1] + d2[1]) * r];
+    const a0 = Math.atan2(-d2[1], -d2[0]), a1 = Math.atan2(-d1[1], -d1[0]);
+    let da = a0 - a1; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+    for (let s = 0; s <= seg; s++) { const t = a1 + da * s / seg; out.push([c[0] + Math.cos(t) * r, c[1] + Math.sin(t) * r]); }
+  });
+  return out;
+}
+
+/* ---------- layout, metres (x east, z south), estimated from the photos ----------
+   Wing A (living / kitchen / dining) x -10..6, z -10..-4
+   Wing B (bedrooms)                  x 6..12,  z -10..7.7 (runs to the south boundary wall)
+   Courtyard inside the L: lawn, pool on the west, deck, niche + garden door on the south wall */
+const H = 3.3, SLAB = 0.6, ROOF = H + SLAB, T = 0.25;
+
+// floors
+box(-10, 6, 0, 0.15, -10, -4, model, { cast: false, color: COL.floor });
+box(6, 12, 0, 0.15, -10, 7.7, model, { cast: false, color: COL.floor });
+// lawn: courtyard + garden behind wing B
+fill(-10.5, 4.6, -2.6, 8, 0.03, COL.lawn);
+
+// walls with openings
+function wallX(z, x0, x1, ops) {
+  let c = x0;
+  ops.forEach(([a, b]) => { if (a > c) box(c, a, 0, H, z - T / 2, z + T / 2); box(a, b, 2.55, H, z - T / 2, z + T / 2); slider('x', z, a, b); c = b; });
+  if (x1 > c) box(c, x1, 0, H, z - T / 2, z + T / 2);
+}
+function wallZ(x, z0, z1, ops) {
+  let c = z0;
+  ops.forEach(([a, b]) => { if (a > c) box(x - T / 2, x + T / 2, 0, H, c, a); box(x - T / 2, x + T / 2, 2.55, H, a, b); slider('z', x, a, b); c = b; });
+  if (z1 > c) box(x - T / 2, x + T / 2, 0, H, c, z1);
+}
+function slider(axis, at, a, b) {
+  const m = (a + b) / 2, y = 2.55;
+  const P = (s, h) => axis === 'x' ? [s, h, at] : [at, h, s];
+  const f = 0.07, d = 0.08;
+  const fr = (s0, s1, h0, h1) => axis === 'x' ? box(s0, s1, h0, h1, at - d / 2, at + d / 2, model, { color: COL.frame, lines: null }) : box(at - d / 2, at + d / 2, h0, h1, s0, s1, model, { color: COL.frame, lines: null });
+  fr(a, a + f, 0.15, y); fr(b - f, b, 0.15, y); fr(m - f / 2, m + f / 2, 0.15, y); fr(a, b, y - f, y); fr(a, b, 0.15, 0.15 + f);
+  const g = new THREE.PlaneGeometry(b - a - 2 * f, y - 0.15 - 2 * f);
+  if (axis === 'z') g.rotateY(Math.PI / 2);
+  g.translate(...P(m, (y + 0.15) / 2));
+  const gl = new THREE.Mesh(g, F(COL.glass, { transparent: true, opacity: 0.75 })); model.add(gl);
+}
+wallX(-4, -10, 6, [[-8.7, -5.6], [-4.4, -0.3], [0.3, 4.1]]);   // courtyard face of wing A
+wallX(-10, -10, 12, [[-7.8, -6.4], [-2.5, 2.5]]);              // north
+wallZ(-10, -10, -4, []);                                       // west gable
+wallZ(6, -4, 7.7, [[-2.4, 0.7], [3.0, 6.0]]);                  // courtyard face of wing B
+wallZ(12, -10, 7.7, [[-7.3, -6.1], [-1.5, 1.5], [3.5, 5.5]]);                // east (entrance side)
+wallX(7.7, 6, 12, []);                                        // south end of wing B, against the boundary wall
+
+// roof: one L slab, overhangs into the courtyard, curved corner over the entrance
+const RC = 2.6, roofPts = [[-10.6, -10.6], [12.6, -10.6]];
+for (let i = 0; i <= 16; i++) { const a = i / 16 * Math.PI / 2; roofPts.push([12.6 - RC + Math.cos(a) * RC, 8.3 - RC + Math.sin(a) * RC]); }
+roofPts.push([4.5, 8.3], [4.5, -2.5], [-10.6, -2.5]);
+slab(roofPts, H, SLAB);
+slab(roofPts, H - 0.03, 0.03, model, { color: COL.soffit, lines: null, cast: false });   // timber soffit
+// stone feature corner inside the L
+box(4.2, 6.0, 0.15, H, -4.16, -4.02, model, { color: COL.stone, lines: null });
+box(6.12, 6.26, 0.15, H, -4.0, -2.7, model, { color: COL.stone, lines: null });
+
+// terraces + stepping stones (flat outlines only)
+fill(-10, 6, -4, -2.6, 0.06, COL.terrace); rect(-10, 6, -4, -2.6, 0.075, model, LINE_SOFT);
+fill(4.6, 6, -4, 7.7, 0.06, COL.terrace); rect(4.6, 6, -4, 7.7, 0.075, model, LINE_SOFT);
+for (let i = 0; i < 13; i++) { fill(-2.75, -1.95, -2.3 + i * 0.75, -1.8 + i * 0.75, 0.07, COL.coping); rect(-2.75, -1.95, -2.3 + i * 0.75, -1.8 + i * 0.75, 0.075, model, LINE_SOFT); }
+
+// pool + deck
+const P = { x0: -9.6, x1: -6.4, z0: -2.3, z1: 6.6 };
+box(P.x0 - 0.35, P.x1 + 0.35, 0, 0.1, P.z0 - 0.35, P.z1 + 0.35, model, { cast: false, color: COL.coping });
+fill(P.x0, P.x1, P.z0, P.z1, 0.104, COL.water);
+rect(P.x0, P.x1, P.z0, P.z1, 0.105, model);
+rect(P.x0 + 0.15, P.x1 - 0.15, P.z0 + 0.15, P.z1 - 0.15, 0.105, model, LINE_SOFT);
+box(-6.05, -3.4, 0, 0.14, -2.6, 7.6, model, { cast: false, color: COL.deck });   // deck runs up to the house terrace
+for (let i = 1; i < 25; i++) polyline([[-6.05, 0.141, -2.6 + i * 0.41], [-3.4, 0.141, -2.6 + i * 0.41]], model, LINE_SOFT);
+
+// boundary walls
+box(-10.8, -10.5, 0, 2.4, -10, 8.3);
+box(-10.8, 6, 0, 2.4, 8, 8.3);
+
+// arched niche + bench at the pool's south end
+(function niche() {
+  const x0 = -10.2, x1 = -6.2, z0 = 7.1, z1 = 8.0, h = 2.9, cx = (x0 + x1) / 2, r = 1.35;
+  const s = new THREE.Shape([new THREE.Vector2(x0, 0), new THREE.Vector2(x1, 0), new THREE.Vector2(x1, h), new THREE.Vector2(x0, h)]);
+  const hole = new THREE.Path(); hole.moveTo(cx - r, 0.55); hole.lineTo(cx + r, 0.55); hole.lineTo(cx + r, 1.25);
+  hole.absarc(cx, 1.25, r, 0, Math.PI, false); hole.lineTo(cx - r, 0.55); s.holes.push(hole);
+  const g = new THREE.ExtrudeGeometry(s, { depth: z1 - z0, bevelEnabled: false, curveSegments: 32 }); g.translate(0, 0, z0);
+  solid(g);
+  box(cx - r, cx + r, 0.55, 2.6, z1 - 0.1, z1 - 0.02, model, { color: COL.stone, lines: null });
+  box(cx - r, cx + r, 0, 0.55, z0 - 0.35, z1);
+  box(cx - r + 0.05, cx + r - 0.05, 0.55, 0.68, z0 - 0.3, z1 - 0.12, model, { color: COL.cushion, lines: LINE_SOFT });
+})();
+// garden door in its box frame
+box(-3.6, -1.1, 0, 2.7, 7.5, 8.33);   // door frame box, a touch proud of the wall so faces don't z-fight
+box(-3.0, -1.7, 0, 2.25, 7.44, 7.5, model, { color: COL.door });   // courtyard side
+box(-3.0, -1.7, 0, 2.25, 8.33, 8.38, model, { color: COL.door });   // lane side
+box(-1.1, -0.6, 0, 2.7, 7.46, 8.36, model, { color: COL.stone });    // stone column beside the door frame
+
+// entrance: breeze-block screen + carport outline
+box(12.3, 12.6, 0, 2.6, -5.6, -1.8, model, { color: COL.breeze });
+box(12.3, 12.7, 0, 2.6, -9.6, -8.0);
+fill(12.3, 17, -10, 4, 0.02, COL.paver); rect(12.3, 17, -10, 4, 0.025, model, LINE_SOFT);
+
+/* ---------- rooftop play deck on wing A ---------- */
+const play = new THREE.Group(); model.add(play);
+const D = { x0: -9.6, x1: 2.6, z0: -9.8, z1: -3.2 }, DY = ROOF + 0.12;
+box(D.x0, D.x1, ROOF, DY, D.z0, D.z1, play, { color: COL.play });
+for (let i = 1; i < 40; i++) polyline([[D.x0 + i * 0.305, DY + 0.002, D.z0], [D.x0 + i * 0.305, DY + 0.002, D.z1]], play, LINE_SOFT);
+function rail(x0, z0, x1, z1) {
+  const len = Math.hypot(x1 - x0, z1 - z0), n = Math.max(1, Math.ceil(len / 1.5));
+  for (let i = 0; i <= n; i++) { const t = i / n, x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t; polyline([[x, DY, z], [x, DY + 1.2, z]], play); }
+  polyline([[x0, DY + 1.2, z0], [x1, DY + 1.2, z1]], play);
+  polyline([[x0, DY + 0.1, z0], [x1, DY + 0.1, z1]], play, LINE_SOFT);
+  const g = new THREE.PlaneGeometry(len, 1.05); g.rotateY(-Math.atan2(z1 - z0, x1 - x0)); g.translate((x0 + x1) / 2, DY + 0.62, (z0 + z1) / 2);
+  play.add(new THREE.Mesh(g, F(COL.rail, { transparent: true, opacity: 0.35, depthWrite: false })));
+}
+rail(D.x0, D.z0, D.x1, D.z0); rail(D.x0, D.z0, D.x0, D.z1);
+rail(D.x0, D.z1, -0.2, D.z1); rail(1.0, D.z1, D.x1, D.z1);     // gap for the slide
+rail(D.x1, D.z0, D.x1, -4.6);                                  // gap for the stair
+// trampoline (two rings, flush)
+const ring = (r, y, x, z, mat = LINE) => { const pts = []; for (let i = 0; i <= 64; i++) { const a = i / 64 * Math.PI * 2; pts.push([x + Math.cos(a) * r, y, z + Math.sin(a) * r]); } polyline(pts, play, mat); };
+{ const disc = (r, y, c) => { const g = new THREE.CircleGeometry(r, 48); g.rotateX(-Math.PI / 2); g.translate(-6.5, y, -7.1); const m = new THREE.Mesh(g, F(c)); m.receiveShadow = true; play.add(m); };
+  disc(1.5, DY + 0.006, COL.trampRim); disc(1.25, DY + 0.01, COL.tramp); }
+ring(1.5, DY + 0.012, -6.5, -7.1); ring(1.25, DY + 0.012, -6.5, -7.1, LINE_SOFT);
+// shade sail on three posts
+const sailP = [[-9.3, 3.0, -9.5], [-3.8, 2.4, -9.5], [-6.5, 2.7, -4.6]];
+sailP.forEach(([x, h, z]) => polyline([[x, DY, z], [x, DY + h, z]], play));
+{ const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(sailP.flatMap(([x, h, z]) => [x, DY + h, z]), 3));
+  const m = new THREE.Mesh(g, F(COL.sail)); m.castShadow = true; play.add(m); polyline(sailP.map(([x, h, z]) => [x, DY + h, z]), play, LINE, true); }
+// play cube with an arched opening (echoes the niche)
+(function cube() {
+  const x0 = -2.4, x1 = 0.4, z0 = -9.6, z1 = -7.6, h = 2.2, cx = (x0 + x1) / 2;
+  box(x0, x1, DY, DY + h, z0, z0 + 0.1, play); box(x0, x0 + 0.1, DY, DY + h, z0, z1, play);
+  box(x1 - 0.1, x1, DY, DY + h, z0, z1, play); box(x0, x1, DY + h, DY + h + 0.12, z0, z1, play);
+  const s = new THREE.Shape([new THREE.Vector2(x0, 0), new THREE.Vector2(x1, 0), new THREE.Vector2(x1, h), new THREE.Vector2(x0, h)]);
+  const hp = new THREE.Path(); hp.moveTo(cx - 0.7, 0); hp.lineTo(cx + 0.7, 0); hp.lineTo(cx + 0.7, 1.1); hp.absarc(cx, 1.1, 0.7, 0, Math.PI, false); hp.lineTo(cx - 0.7, 0);
+  s.holes.push(hp); const g = new THREE.ExtrudeGeometry(s, { depth: 0.1, bevelEnabled: false, curveSegments: 24 }); g.translate(0, DY, z1 - 0.1);
+  solid(g, play);
+})();
+// slide: two rails + ribs, from the south rail gap down to the lawn
+const SLIDE = new THREE.CatmullRomCurve3([[0.4, DY + 0.45, -3.4], [0.4, DY + 0.25, -2.3], [0.6, 2.4, -0.4], [1.2, 1.1, 1.6], [1.6, 0.45, 3.0], [1.7, 0.35, 3.8]].map(p => new THREE.Vector3(...p)));
+(function slide() {
+  const c = SLIDE;
+  const L = [], R = [], up = new THREE.Vector3(0, 1, 0);
+  for (let i = 0; i <= 60; i++) {
+    const p = c.getPointAt(i / 60), t = c.getTangentAt(i / 60), s = new THREE.Vector3().crossVectors(t, up).normalize().multiplyScalar(0.38);
+    L.push(p.clone().add(s).toArray()); R.push(p.clone().sub(s).toArray());
+    if (i % 6 === 0) polyline([L[i], [p.x, p.y - 0.2, p.z], R[i]], play, LINE_SOFT);
+  }
+  polyline(L, play); polyline(R, play);
+  const pos = [], idx = [];
+  for (let i = 0; i <= 60; i++) { const p = c.getPointAt(i / 60); pos.push(...L[i], p.x, p.y - 0.2, p.z, ...R[i]); }
+  for (let i = 0; i < 60; i++) { const a = i * 3; idx.push(a, a + 3, a + 1, a + 1, a + 3, a + 4, a + 1, a + 4, a + 2, a + 2, a + 4, a + 5); }
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); sg.setIndex(idx); sg.computeVertexNormals();
+  const sm = new THREE.Mesh(sg, F(COL.slide)); sm.castShadow = true; sm.receiveShadow = true; play.add(sm);
+  [[0.6, -0.4, 2.4], [1.2, 1.6, 1.1]].forEach(([x, z, h]) => polyline([[x, 0, z], [x, h - 0.2, z]], play));
+})();
+// stair from wing B terrace up to the deck's east landing
+(function stair() {
+  const x0 = 3.0, x1 = 4.2, zTop = -3.6, zBot = 2.6, n = 20, rise = DY / n, run = (zBot - zTop) / n;
+  for (let i = 0; i < n; i++) { const y = rise * (n - i), z = zTop + i * run; box(x0, x1, y - 0.05, y, z, z + run, play, { color: COL.play, lines: LINE_SOFT }); }
+  [x0, x1].forEach(x => { polyline([[x, DY, zTop], [x, 0, zBot]], play); polyline([[x, DY + 1, zTop], [x, 1, zBot]], play); });
+  box(2.6, 4.2, DY - 0.12, DY, -4.6, -3.2, play, { color: COL.play });
+})();
+
+/* ---------- simple planting: palms outside, banana clumps inside the walls ---------- */
+function palm(x, z, h, lean) {
+  const c = new THREE.CatmullRomCurve3([new THREE.Vector3(x, 0, z), new THREE.Vector3(x + lean * 0.3, h * 0.5, z), new THREE.Vector3(x + lean, h, z + lean * 0.3)]);
+  solid(new THREE.TubeGeometry(c, 12, 0.17, 6), model, { color: COL.trunk, lines: null });
+  for (let i = 0; i < 9; i++) {
+    const a = i / 9 * Math.PI * 2, g = new THREE.ConeGeometry(0.35, 3.4, 4);
+    g.translate(0, 1.7, 0); g.scale(1, 1, 0.25);
+    const m = new THREE.Mesh(g, F(COL.palm)); m.position.set(x + lean, h, z + lean * 0.3);
+    m.rotation.set(0, a, 0); m.rotateX(1.2); m.castShadow = true; model.add(m);
+  }
+}
+[[-15, -6, 9, 0.6], [-6, -15, 10, 0.8], [5, -16, 8.5, -0.5], [16, -13, 9.5, 0.6], [20, 2, 8, -0.5], [-17, 6, 8.5, -0.4]]
+  .forEach(([x, z, h, l]) => palm(x, z, h, l));
+function clump(x, z, s) {
+  const g = new THREE.IcosahedronGeometry(0.75 * s, 0); g.scale(1, 1.5, 1);
+  const m = new THREE.Mesh(g, F(COL.leaf)); m.position.set(x, 1.05 * s, z); m.rotation.y = x * 7 + z; m.castShadow = m.receiveShadow = true; model.add(m);
+}
+for (let z = -2.2; z < 6.8; z += 1.1) clump(-10.0, z, 1 + ((z * 13) % 3) * 0.08);
+for (let z = -1.6; z < 7.4; z += 3.2) clump(4.3, z + 1.2, 0.7);   // small clumps along the bedroom terrace
+
+/* ---------- three kids: lawn → stair → trampoline → slide → lawn, on a loop ---------- */
+const SKIN = ['#e9b994', '#d9a27a', '#f0c7a6'], SHIRT = ['#e05a47', '#f2c14e', '#4a90d9'], SHORTS = ['#2f4a6d', '#6b4f3a', '#3d6b47'], HAIR = ['#6b4a2b', '#e2c27a', '#2b2220'];
+// box figures in the building's style: flat colour + the same black edge lines
+function makeKid(i) {
+  const g = new THREE.Group();
+  const part = (w, h, d, x, y, z, color, parent, hang = false) => {
+    const geo = new THREE.BoxGeometry(w, h, d); geo.translate(x, hang ? y - h / 2 : y, z);
+    return solid(geo, parent, { color, lines: LINE });
+  };
+  const body = new THREE.Group(); g.add(body);
+  part(0.3, 0.34, 0.18, 0, 0.8, 0, SHIRT[i], body);          // shirt
+  part(0.3, 0.14, 0.19, 0, 0.58, 0, SHORTS[i], body);        // shorts
+  part(0.24, 0.24, 0.24, 0, 1.12, 0, SKIN[i], body);         // head
+  part(0.26, 0.07, 0.26, 0, 1.265, -0.01, HAIR[i], body);    // hair
+  const limb = (x, y, len, w, color) => { const pv = new THREE.Group(); pv.position.set(x, y, 0); body.add(pv); part(w, len, w, 0, 0, 0, color, pv, true); return pv; };
+  const legL = limb(-0.075, 0.52, 0.48, 0.11, SKIN[i]), legR = limb(0.075, 0.52, 0.48, 0.11, SKIN[i]);
+  const armL = limb(-0.195, 0.95, 0.38, 0.08, SKIN[i]), armR = limb(0.195, 0.95, 0.38, 0.08, SKIN[i]);
+  g.userData = { body, legL, legR, armL, armR, yaw: 0, prev: null };
+  model.add(g); return g;
+}
+// path segments: walk / climb polylines at a speed, bounce on the spot, slide along SLIDE
+const Y0 = 0.05;
+const ROUTE = [
+  { type: 'walk', speed: 1.3, pts: [[1.8, Y0, 4.4], [2.9, Y0, 4.2], [3.6, Y0, 3.2]] },
+  { type: 'climb', dur: 5.5, pts: [[3.6, Y0, 2.9], [3.6, DY, -3.7]] },
+  { type: 'walk', speed: 1.4, pts: [[3.6, DY, -3.7], [3.2, DY, -4.1], [0.6, DY, -5.6], [-4.5, DY, -6.6], [-6.5, DY, -7.1]] },
+  { type: 'bounce', dur: 3.2, at: [-6.5, DY, -7.1] },
+  { type: 'walk', speed: 1.4, pts: [[-6.5, DY, -7.1], [-3.5, DY, -5.2], [-0.4, DY, -4.2], [0.4, DY, -3.9]] },
+  { type: 'slide', dur: 2.6 },
+  { type: 'walk', speed: 1.1, pts: [[1.7, Y0, 3.9], [1.8, Y0, 4.4]] },
+];
+const plen = pts => pts.slice(1).reduce((a, p, i) => a + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1], p[2] - pts[i][2]), 0);
+ROUTE.forEach(r => { if (!r.dur) r.dur = plen(r.pts) / r.speed; });
+const LOOP = ROUTE.reduce((a, r) => a + r.dur, 0);
+function along(pts, u) {
+  const L = plen(pts) * u; let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], l = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    if (acc + l >= L || i === pts.length - 1) { const k = l ? Math.min(1, (L - acc) / l) : 0; return new THREE.Vector3(a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k); }
+    acc += l;
+  }
+}
+const kids = [0, 1, 2].map(makeKid);
+function updateKid(k, t) {
+  let r, u = ((t % LOOP) + LOOP) % LOOP;
+  for (r of ROUTE) { if (u < r.dur) break; u -= r.dur; }
+  const f = u / r.dur, d = k.userData, pos = new THREE.Vector3();
+  let swing = 0, legs = 0, arms = 0, armsUp = 0, lean = 0;
+  if (r.type === 'walk' || r.type === 'climb') {
+    pos.copy(along(r.pts, f));
+    const rate = r.type === 'climb' ? 9 : 8; swing = Math.sin(t * rate) * (r.type === 'climb' ? 0.75 : 0.55);
+    if (r.type === 'climb') lean = 0.25;
+  } else if (r.type === 'bounce') {
+    const b = Math.abs(Math.sin(f * Math.PI * 4));
+    pos.set(r.at[0], r.at[1] + b * 0.9, r.at[2]); armsUp = 2.6 + Math.sin(f * 50) * 0.3; legs = (1 - b) * 0.3;
+  } else { // slide: accelerate, sit in the channel, arms up
+    const e = f * f * (1.4 - 0.4 * f);
+    const p = SLIDE.getPointAt(Math.min(1, e));
+    pos.set(p.x, p.y - 0.2 - 0.5 + 0.06, p.z); legs = 1.45; armsUp = 2.7;
+  }
+  // face the direction of travel (smoothed), stay put on bounce
+  if (d.prev && r.type !== 'bounce') {
+    const dx = pos.x - d.prev.x, dz = pos.z - d.prev.z;
+    if (dx * dx + dz * dz > 1e-6) { const target = Math.atan2(dx, dz); let da = target - d.yaw; da = Math.atan2(Math.sin(da), Math.cos(da)); d.yaw += da * 0.25; }
+  }
+  d.prev = pos.clone();
+  k.position.copy(pos); k.rotation.y = d.yaw; d.body.rotation.x = lean;
+  d.legL.rotation.x = -legs + swing; d.legR.rotation.x = -legs - swing;
+  d.armL.rotation.x = armsUp ? -armsUp : -swing * 0.9; d.armR.rotation.x = armsUp ? -armsUp - (r.type === 'bounce' ? 0.3 : 0) : swing * 0.9;
+}
+let kidTime = 0;
+const updateKids = dt => { kidTime += dt; kids.forEach((k, i) => updateKid(k, kidTime + i * LOOP / 3)); };
+
+/* ---------- own wheel zoom (from building-3d-widget: stock zoom feels dead on retina/pinch) ---------- */
+controls.enableZoom = false;
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  const k = e.ctrlKey ? 0.014 : 0.0028;
+  const off = camera.position.clone().sub(controls.target);
+  off.setLength(THREE.MathUtils.clamp(off.length() * Math.exp(dy * k), controls.minDistance, controls.maxDistance));
+  camera.position.copy(controls.target).add(off);
+}, { passive: false });
+
+/* ---------- resize + loop with pixel-ratio governor, shadows every other frame ---------- */
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h;
+  [LINE, LINE_SOFT].forEach(m => m.resolution.set(w, h));
+  camera.fov = w / h < 16 / 9 ? 32 * Math.min(1.6, (16 / 9) / (w / h)) : 32;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+window.__v = { camera, controls, scene, renderer, updateKids, kids, LOOP };
+const clock = new THREE.Clock();
+let pf = 0, pt = 0, shadowTick = false;
+renderer.setAnimationLoop(() => {
+  const raw = clock.getDelta();
+  if (!document.hidden) { pf++; pt += raw; if (pt >= 1) { if (pt / pf > 1 / 45 && pixelRatio > 1) { pixelRatio = Math.max(1, pixelRatio - 0.25); renderer.setPixelRatio(pixelRatio); resize(); } pf = 0; pt = 0; } }
+  controls.update();
+  updateKids(Math.min(raw, 0.05));
+  shadowTick = !shadowTick; renderer.shadowMap.needsUpdate = shadowTick;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
