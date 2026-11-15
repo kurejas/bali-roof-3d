@@ -13,11 +13,31 @@
   #heads button { width: 46px; height: 46px; padding: 0; border-radius: 50%; border: 1.5px solid #1a1a1a; background: #f3f0e9; cursor: pointer; overflow: hidden; }
   #heads button img { width: 100%; height: 100%; display: block; }
   #heads button.on { border-color: #ff7a1a; box-shadow: 0 0 0 2.5px #ff7a1a; }
+  /* on-screen controls (shown while a character is selected): keycaps like a keyboard's arrow cluster */
+  .pad { position: fixed; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 3; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #arrows { right: calc(18px + env(safe-area-inset-right)); display: grid; grid-template-columns: repeat(3, 58px); grid-template-rows: 58px 58px; gap: 8px; }
+  #arrows [data-key="ArrowUp"] { grid-column: 2; grid-row: 1; }
+  #arrows [data-key="ArrowLeft"] { grid-column: 1; grid-row: 2; }
+  #arrows [data-key="ArrowDown"] { grid-column: 2; grid-row: 2; }
+  #arrows [data-key="ArrowRight"] { grid-column: 3; grid-row: 2; }
+  #actions { left: calc(18px + env(safe-area-inset-left)); display: flex; gap: 10px; align-items: flex-end; }
+  .cap { width: 58px; height: 58px; padding: 0; border: 4px solid #1a1a1a; border-radius: 14px; background: #fff; box-shadow: 0 5px 0 #1a1a1a; display: flex; align-items: center; justify-content: center; cursor: pointer; touch-action: none; transition: transform 60ms, box-shadow 60ms; }
+  .cap svg { width: 20px; height: 20px; display: block; }
+  .cap.round { width: 70px; height: 70px; border-radius: 50%; font: 800 14px/1 -apple-system, "SF Pro Rounded", system-ui, sans-serif; letter-spacing: 0.04em; color: #1a1a1a; }
+  .cap.down { transform: translateY(4px); box-shadow: 0 1px 0 #1a1a1a; background: #f3f0e9; }
+  @media (max-width: 420px) {   /* phones: smaller caps so the two clusters never touch */
+    #arrows { grid-template-columns: repeat(3, 50px); grid-template-rows: 50px 50px; gap: 6px; right: calc(12px + env(safe-area-inset-right)); }
+    #actions { gap: 8px; left: calc(12px + env(safe-area-inset-left)); }
+    .cap { width: 50px; height: 50px; border-width: 3.5px; border-radius: 12px; }
+    .cap.round { width: 60px; height: 60px; font-size: 12px; }
+  }
 </style>
 </head>
 <body>
 <canvas id="gl"></canvas>
 <div id="heads"></div>
+<div id="arrows" class="pad" hidden><button class="cap" data-key="ArrowUp" aria-label="Forward"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(0 10 10)"/></svg></button><button class="cap" data-key="ArrowLeft" aria-label="Turn left"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(-90 10 10)"/></svg></button><button class="cap" data-key="ArrowDown" aria-label="Back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(180 10 10)"/></svg></button><button class="cap" data-key="ArrowRight" aria-label="Turn right"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(90 10 10)"/></svg></button></div>
+<div id="actions" class="pad" hidden><button class="cap round" data-key="Shift" aria-label="Run (hold)">RUN</button><button class="cap round" data-key=" " aria-label="Jump">JUMP</button></div>
 <script type="importmap">
 { "imports": {
   "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
@@ -533,9 +553,40 @@ function makePiglet() {
   g.userData = { body, legL, legR, armL, armR, tail, yaw: 0, prev: null, outline: true };
   model.add(g); return g;
 }
+// original rounded pup: same smooth parts + black outline shell as the piglet and monkey
+function makeRoundPup() {
+  const g = new THREE.Group(), body = new THREE.Group(); g.add(body);
+  const FUR = '#cfcac2', MUZ = '#f4f1ea', EAR = '#3a3836', SHIRT = '#4a90d9', SH = '#6b4f3a';
+  const round = (geo, color, parent, x, y, z, sx = 1, sy = 1, sz = 1, ol = 0.035) => {
+    const m = new THREE.Mesh(geo, F(color)); m.position.set(x, y, z); m.scale.set(sx, sy, sz); m.castShadow = true; m.receiveShadow = true; parent.add(m);
+    geo.computeBoundingSphere(); const o = new THREE.Mesh(geo, OUTLINE); o.scale.setScalar(1 + ol / geo.boundingSphere.radius); m.add(o); return m;
+  };
+  const S = (r, w = 20, h = 14) => new THREE.SphereGeometry(r, w, h);
+  round(S(0.18), SHIRT, body, 0, 0.8, 0, 1, 1.2, 0.92);                // round shirt body
+  round(new THREE.CylinderGeometry(0.165, 0.175, 0.13, 20), SH, body, 0, 0.6, 0);   // shorts
+  round(S(0.165), FUR, body, 0, 1.15, 0, 1.05, 0.98, 1);              // head
+  round(S(0.085), MUZ, body, 0, 1.09, 0.13, 1.2, 0.85, 0.9, 0.018);   // muzzle
+  round(S(0.032, 12, 10), '#1d1d1d', body, 0, 1.12, 0.215, 1.3, 0.9, 0.8, 0.004);   // nose
+  [-1, 1].forEach(sd => {
+    round(S(0.03, 12, 10), '#ffffff', body, sd * 0.06, 1.19, 0.14, 1, 1, 0.6, 0.008);   // eyes
+    round(S(0.016, 10, 8), '#1a1a1a', body, sd * 0.06, 1.19, 0.158, 1, 1, 0.6, 0.001);
+    round(S(0.075, 14, 10), EAR, body, sd * 0.16, 1.1, -0.01, 0.45, 1.35, 0.8, 0.012);  // floppy ears
+  });
+  const tail = new THREE.Group(); tail.position.set(0, 0.64, -0.15); tail.rotation.x = -0.8; body.add(tail);
+  const tg = new THREE.CapsuleGeometry(0.035, 0.18, 4, 8); tg.rotateX(Math.PI / 2); tg.translate(0, 0, -0.12);
+  round(tg, FUR, tail, 0, 0, 0, 1, 1, 1, 0.012);
+  const limb = (x, y, len, r, color) => { const pv = new THREE.Group(); pv.position.set(x, y, 0); body.add(pv);
+    const geo = new THREE.CapsuleGeometry(r, len - 2 * r, 4, 10); geo.translate(0, -len / 2, 0);
+    const m = new THREE.Mesh(geo, F(color)); m.castShadow = true; pv.add(m); const o = new THREE.Mesh(geo, OUTLINE); o.scale.set(1 + 0.03 / r, 1.04, 1 + 0.03 / r); pv.add(o); return pv; };
+  const legL = limb(-0.08, 0.56, 0.48, 0.058, FUR), legR = limb(0.08, 0.56, 0.48, 0.058, FUR);
+  const armL = limb(-0.205, 0.95, 0.4, 0.048, FUR), armR = limb(0.205, 0.95, 0.4, 0.048, FUR);
+  g.userData = { body, legL, legR, armL, armR, tail, yaw: 0, prev: null, outline: true };
+  model.add(g); return g;
+}
 function makeKid(i) {
   if (i === 0) return makePiglet();
   if (i === 1) return makeMonkey();
+  if (i === 2) return makeRoundPup();
   const P = PUPS[i], g = new THREE.Group();
   const part = (w, h, d, x, y, z, color, parent, hang = false) => {
     const geo = new THREE.BoxGeometry(w, h, d); geo.translate(x, hang ? y - h / 2 : y, z);
@@ -862,7 +913,22 @@ const updateKids = dt => { kidTime += dt; updateFade(dt); updateSplash(dt); upda
 
 /* ---------- head icons, top-left: rendered once from each character's own model ---------- */
 const headBtns = [];
-function syncHeads() { headBtns.forEach((b, i) => b.classList.toggle('on', kids[i] === ctrl)); }
+function syncHeads() {
+  headBtns.forEach((b, i) => b.classList.toggle('on', kids[i] === ctrl));
+  document.querySelectorAll('.pad').forEach(p => { p.hidden = !ctrl; });
+  if (!ctrl) { keys.clear(); document.querySelectorAll('.cap.down').forEach(c => c.classList.remove('down')); }
+}
+// on-screen pad: hold a cap = hold that key; each finger/pointer tracked on its own (multi-touch)
+document.querySelectorAll('.pad .cap').forEach(cap => {
+  const key = cap.dataset.key, held = new Set();
+  const press = e => { e.preventDefault(); e.stopPropagation(); held.add(e.pointerId); keys.add(key); cap.classList.add('down');
+    try { cap.setPointerCapture(e.pointerId); } catch (_) { /* capture is a nicety; the press already counts */ } };
+  const lift = e => { if (!held.delete(e.pointerId)) return; if (!held.size) { keys.delete(key); cap.classList.remove('down'); } };
+  cap.addEventListener('pointerdown', press);
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(t => cap.addEventListener(t, lift));
+  cap.addEventListener('contextmenu', e => e.preventDefault());
+  cap.addEventListener('click', e => e.stopPropagation());
+});
 (function makeHeads() {
   const S = 128, rt = new THREE.WebGLRenderTarget(S, S), ts = new THREE.Scene();
   ts.add(new THREE.HemisphereLight(0xffffff, 0xb8b29c, 1.6)); const dl = new THREE.DirectionalLight(0xffffff, 1.2); dl.position.set(1, 2, 3); ts.add(dl);
