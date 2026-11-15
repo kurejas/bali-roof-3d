@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sibang villa v3</title>
+<style>
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfcdc4;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+  #gl { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #heads { position: fixed; top: 14px; left: 14px; display: flex; gap: 8px; z-index: 2; }
+  #heads button { width: 46px; height: 46px; padding: 0; border-radius: 50%; border: 1.5px solid #1a1a1a; background: #f3f0e9; cursor: pointer; overflow: hidden; }
+  #heads button img { width: 100%; height: 100%; display: block; }
+  #heads button.on { border-color: #ff7a1a; box-shadow: 0 0 0 2.5px #ff7a1a; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="heads"></div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+
+/* ---------- renderer / scene (pattern from building-3d-widget) ---------- */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+let pixelRatio = Math.min(devicePixelRatio, 2);
+renderer.setPixelRatio(pixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap; // VSM smeared into hard grey blocks at the frustum edge
+renderer.shadowMap.autoUpdate = false;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#cfcdc4'); // = the ground's rendered pixel, so there's no horizon line
+
+const camera = new THREE.PerspectiveCamera(32, 1, 0.5, 400);
+camera.position.set(-22, 24, 32);
+const controls = new OrbitControls(camera, canvas);
+controls.target.set(1, 1.5, -1);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 3;
+controls.maxDistance = 120;
+controls.minPolarAngle = 0.05;
+controls.maxPolarAngle = 1.45;
+controls.rotateSpeed = 0.7;
+
+/* ---------- light: soft sky + one warm sun ---------- */
+scene.add(new THREE.HemisphereLight(0xf2f6ff, 0xb8b29c, 1.25));
+const sun = new THREE.DirectionalLight(0xfff1dc, 1.9);
+sun.position.set(-18, 40, 26);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 40, bottom: -40, near: 1, far: 140 });
+sun.shadow.bias = -0.0008;
+sun.shadow.normalBias = 0.02;
+sun.target.position.set(1, 0, -1);
+scene.add(sun, sun.target);
+const groundGeo = (() => {   // 400 m plane with a hole for the pool basin (x -9.6..-6.4, z -2.3..6.6)
+  const sh = new THREE.Shape([[-200, -200], [200, -200], [200, 200], [-200, 200]].map(([x, y]) => new THREE.Vector2(x, y)));
+  sh.holes.push(new THREE.Path([[-9.6, 2.3], [-6.4, 2.3], [-6.4, -6.6], [-9.6, -6.6]].map(([x, y]) => new THREE.Vector2(x, y))));
+  const g = new THREE.ShapeGeometry(sh); g.rotateX(-Math.PI / 2); return g; })();
+const ground = new THREE.Mesh(groundGeo, new THREE.MeshLambertMaterial({ color: '#dcdccf', polygonOffset: true, polygonOffsetFactor: 6, polygonOffsetUnits: 6 }));
+ground.position.y = -0.01; ground.receiveShadow = true; scene.add(ground);
+
+/* ---------- line-model primitives ---------- */
+// flat colours, one material per hex; polygonOffset keeps the edge lines on top
+const COL = {
+  wall: '#f3f0e9', floor: '#e7e1d5', soffit: '#a96b3e', terrace: '#ddd5c4', stone: '#d8c7a4', lawn: '#86a35e',
+  coping: '#e6dfd0', water: '#5fb8a8', deck: '#4b403a', door: '#b8773f', frame: '#2a2a2c', glass: '#7d939b',
+  breeze: '#55585c', paver: '#a7a298', fence: '#7a6c5a', cushion: '#ece5d6',
+  play: '#c19364', rail: '#cfe6ee', tramp: '#26302f', trampRim: '#2f8f5b', sail: '#f7f1e6', slide: '#e8743b', steel: '#3b3b3d',
+  trunk: '#8b7a63', palm: '#5f8b40', leaf: '#4f8a3a',
+};
+const mats = {};
+function F(hex, extra = {}) {
+  const k = hex + JSON.stringify(extra);
+  return mats[k] ||= new THREE.MeshLambertMaterial({ color: hex, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide, ...extra });
+}
+const FACE = F(COL.wall);
+// LineBasicMaterial ignores linewidth in WebGL, so edges use screen-space fat lines (px)
+const LINE = new LineMaterial({ color: 0x1a1a1a, linewidth: 1.2, transparent: true, opacity: 0.8 });
+const LINE_SOFT = new LineMaterial({ color: 0x1a1a1a, linewidth: 0.8, transparent: true, opacity: 0.35 });
+const model = new THREE.Group(); scene.add(model);
+
+function solid(geo, parent = model, { cast = true, lines = LINE, angle = 20, color = COL.wall, mat } = {}) {
+  const m = new THREE.Mesh(geo, mat || F(color)); m.castShadow = cast; m.receiveShadow = true; parent.add(m);
+  if (lines) parent.add(new LineSegments2(new LineSegmentsGeometry().fromEdgesGeometry(new THREE.EdgesGeometry(geo, angle)), lines));
+  return m;
+}
+// flat coloured patch on the ground (lawn, terraces, stones)
+function fill(x0, x1, z0, z1, y, color, parent = model) {
+  const g = new THREE.PlaneGeometry(x1 - x0, z1 - z0); g.rotateX(-Math.PI / 2); g.translate((x0 + x1) / 2, y, (z0 + z1) / 2);
+  const m = new THREE.Mesh(g, F(color)); m.receiveShadow = true; parent.add(m); return m;
+}
+function box(x0, x1, y0, y1, z0, z1, parent, opts) {
+  const g = new THREE.BoxGeometry(x1 - x0, y1 - y0, z1 - z0);
+  g.translate((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2);
+  return solid(g, parent, opts);
+}
+function polyline(pts, parent = model, mat = LINE, closed = false) {
+  const v = pts.map(p => new THREE.Vector3(...p)); if (closed) v.push(v[0].clone());
+  const g = new LineGeometry(); g.setPositions(v.flatMap(p => [p.x, p.y, p.z]));
+  const l = new Line2(g, mat); l.computeLineDistances(); parent.add(l); return l;
+}
+const rect = (x0, x1, z0, z1, y, parent, mat) => polyline([[x0, y, z0], [x1, y, z0], [x1, y, z1], [x0, y, z1]], parent, mat, true);
+// extrude a world-XZ outline upward (shape uses x, -z)
+function slab(pts, y0, h, parent = model, opts) {
+  const s = new THREE.Shape(pts.map(([x, z]) => new THREE.Vector2(x, -z)));
+  const g = new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: 24 });
+  g.rotateX(-Math.PI / 2); g.translate(0, y0, 0); return solid(g, parent, opts);
+}
+function roundCorner(pts, i, r, seg = 16) {
+  const out = [], n = pts.length;
+  pts.forEach((p, k) => {
+    if (k !== i) { out.push(p); return; }
+    const u = (a, b) => { const l = Math.hypot(b[0] - a[0], b[1] - a[1]); return [(b[0] - a[0]) / l, (b[1] - a[1]) / l]; };
+    const d1 = u(p, pts[(k - 1 + n) % n]), d2 = u(p, pts[(k + 1) % n]);
+    const c = [p[0] + (d1[0] + d2[0]) * r, p[1] + (d1[1] + d2[1]) * r];
+    const a0 = Math.atan2(-d2[1], -d2[0]), a1 = Math.atan2(-d1[1], -d1[0]);
+    let da = a0 - a1; if (da > Math.PI) da -= 2 * Math.PI; if (da < -Math.PI) da += 2 * Math.PI;
+    for (let s = 0; s <= seg; s++) { const t = a1 + da * s / seg; out.push([c[0] + Math.cos(t) * r, c[1] + Math.sin(t) * r]); }
+  });
+  return out;
+}
+
+/* ---------- layout, metres (x east, z south), estimated from the photos ----------
+   Wing A (living / kitchen / dining) x -10..6, z -10..-4
+   Wing B (bedrooms)                  x 6..12,  z -10..7.7 (runs to the south boundary wall)
+   Courtyard inside the L: lawn, pool on the west, deck, niche + garden door on the south wall */
+const H = 3.3, SLAB = 0.6, ROOF = H + SLAB, T = 0.25;
+
+// floors
+box(-10, 6, 0, 0.15, -10, -4, model, { cast: false, color: COL.floor });
+box(6, 12, 0, 0.15, -10, 7.7, model, { cast: false, color: COL.floor });
+// lawn: courtyard + garden behind wing B
+fill(-6.05, 4.6, -2.6, 8, 0.03, COL.lawn); fill(-10.5, -9.95, -2.6, 8, 0.03, COL.lawn); fill(-9.95, -6.05, 6.95, 8, 0.03, COL.lawn);   // lawn, cut around the pool
+
+// walls with openings
+function wallX(z, x0, x1, ops) {
+  let c = x0;
+  ops.forEach(([a, b]) => { if (a > c) box(c, a, 0, H, z - T / 2, z + T / 2); box(a, b, 2.55, H, z - T / 2, z + T / 2); slider('x', z, a, b); c = b; });
+  if (x1 > c) box(c, x1, 0, H, z - T / 2, z + T / 2);
+}
+function wallZ(x, z0, z1, ops) {
+  let c = z0;
+  ops.forEach(([a, b]) => { if (a > c) box(x - T / 2, x + T / 2, 0, H, c, a); box(x - T / 2, x + T / 2, 2.55, H, a, b); slider('z', x, a, b); c = b; });
+  if (z1 > c) box(x - T / 2, x + T / 2, 0, H, c, z1);
+}
+function slider(axis, at, a, b) {
+  const m = (a + b) / 2, y = 2.55;
+  const P = (s, h) => axis === 'x' ? [s, h, at] : [at, h, s];
+  const f = 0.07, d = 0.08;
+  const fr = (s0, s1, h0, h1) => axis === 'x' ? box(s0, s1, h0, h1, at - d / 2, at + d / 2, model, { color: COL.frame, lines: null }) : box(at - d / 2, at + d / 2, h0, h1, s0, s1, model, { color: COL.frame, lines: null });
+  fr(a, a + f, 0.15, y); fr(b - f, b, 0.15, y); fr(m - f / 2, m + f / 2, 0.15, y); fr(a, b, y - f, y); fr(a, b, 0.15, 0.15 + f);
+  const g = new THREE.PlaneGeometry(b - a - 2 * f, y - 0.15 - 2 * f);
+  if (axis === 'z') g.rotateY(Math.PI / 2);
+  g.translate(...P(m, (y + 0.15) / 2));
+  const gl = new THREE.Mesh(g, F(COL.glass, { transparent: true, opacity: 0.75 })); model.add(gl);
+}
+wallX(-4, -10, 6, [[-8.7, -5.6], [-4.4, -0.3], [0.3, 4.1]]);   // courtyard face of wing A
+wallX(-10, -10, 12, [[-7.8, -6.4], [-2.5, 2.5]]);              // north
+wallZ(-10, -10, -4, []);                                       // west gable
+wallZ(6, -4, 7.7, [[-2.4, 0.7], [3.0, 6.0]]);                  // courtyard face of wing B
+wallZ(12, -10, 7.7, [[-7.3, -6.1], [-1.5, 1.5], [3.5, 5.5]]);                // east (entrance side)
+wallX(7.7, 6, 12, []);                                        // south end of wing B, against the boundary wall
+
+// roof: one L slab, overhangs into the courtyard, curved corner over the entrance
+const RC = 2.6, roofPts = [[-10.6, -10.6], [12.6, -10.6]];
+for (let i = 0; i <= 16; i++) { const a = i / 16 * Math.PI / 2; roofPts.push([12.6 - RC + Math.cos(a) * RC, 8.3 - RC + Math.sin(a) * RC]); }
+roofPts.push([4.5, 8.3], [4.5, -2.5], [-10.6, -2.5]);
+slab(roofPts, H, SLAB);
+slab(roofPts, H - 0.03, 0.03, model, { color: COL.soffit, lines: null, cast: false });   // timber soffit
+// stone feature corner inside the L
+box(4.2, 6.0, 0.15, H, -4.16, -4.02, model, { color: COL.stone, lines: null });
+box(6.12, 6.26, 0.15, H, -4.0, -2.7, model, { color: COL.stone, lines: null });
+
+// terraces + stepping stones (flat outlines only)
+fill(-10, 6, -4, -2.6, 0.06, COL.terrace); rect(-10, 6, -4, -2.6, 0.075, model, LINE_SOFT);
+fill(4.6, 6, -4, 7.7, 0.06, COL.terrace); rect(4.6, 6, -4, 7.7, 0.075, model, LINE_SOFT);
+for (let i = 0; i < 13; i++) { fill(-2.75, -1.95, -2.3 + i * 0.75, -1.8 + i * 0.75, 0.07, COL.coping); rect(-2.75, -1.95, -2.3 + i * 0.75, -1.8 + i * 0.75, 0.075, model, LINE_SOFT); }
+
+// pool + deck
+const P = { x0: -9.6, x1: -6.4, z0: -2.3, z1: 6.6 };
+const PD = 1.4, WY = 0.02;   // basin depth, water level
+box(P.x0 - 0.35, P.x1 + 0.35, 0, 0.1, P.z0 - 0.35, P.z0, model, { cast: false, color: COL.coping });   // coping strips
+box(P.x0 - 0.35, P.x1 + 0.35, 0, 0.1, P.z1, P.z1 + 0.35, model, { cast: false, color: COL.coping });
+box(P.x0 - 0.35, P.x0, 0, 0.1, P.z0, P.z1, model, { cast: false, color: COL.coping });
+box(P.x1, P.x1 + 0.35, 0, 0.1, P.z0, P.z1, model, { cast: false, color: COL.coping });
+const TILE = '#8fd0c6';
+box(P.x0, P.x1, -PD - 0.1, -PD, P.z0, P.z1, model, { cast: false, color: '#7cc4b9' });                 // floor
+box(P.x0, P.x0 + 0.06, -PD, 0, P.z0, P.z1, model, { cast: false, color: TILE, lines: LINE_SOFT });   // walls
+box(P.x1 - 0.06, P.x1, -PD, 0, P.z0, P.z1, model, { cast: false, color: TILE, lines: LINE_SOFT });
+box(P.x0, P.x1, -PD, 0, P.z0, P.z0 + 0.06, model, { cast: false, color: TILE, lines: LINE_SOFT });
+box(P.x0, P.x1, -PD, 0, P.z1 - 0.06, P.z1, model, { cast: false, color: TILE, lines: LINE_SOFT });
+for (let k = 1; k < 4; k++) polyline([[P.x0 + k * 0.8, -PD + 0.002, P.z0], [P.x0 + k * 0.8, -PD + 0.002, P.z1]], model, LINE_SOFT);   // lane lines
+{ const g = new THREE.PlaneGeometry(P.x1 - P.x0, P.z1 - P.z0); g.rotateX(-Math.PI / 2); g.translate((P.x0 + P.x1) / 2, WY, (P.z0 + P.z1) / 2);
+  const w = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: '#6fd2c8', transparent: true, opacity: 0.38, depthWrite: false })); w.renderOrder = 2; model.add(w); }
+rect(P.x0, P.x1, P.z0, P.z1, 0.1, model);
+box(-6.05, -3.4, 0, 0.14, -2.6, 7.6, model, { cast: false, color: COL.deck });   // deck runs up to the house terrace
+for (let i = 1; i < 25; i++) polyline([[-6.05, 0.141, -2.6 + i * 0.41], [-3.4, 0.141, -2.6 + i * 0.41]], model, LINE_SOFT);
+
+// boundary walls
+box(-10.8, -10.5, 0, 2.4, -10, 8.3);
+box(-10.8, 6, 0, 2.4, 8, 8.3);
+
+// arched niche + bench at the pool's south end
+(function niche() {
+  const x0 = -10.2, x1 = -6.2, z0 = 7.1, z1 = 8.0, h = 2.9, cx = (x0 + x1) / 2, r = 1.35;
+  const s = new THREE.Shape([new THREE.Vector2(x0, 0), new THREE.Vector2(x1, 0), new THREE.Vector2(x1, h), new THREE.Vector2(x0, h)]);
+  const hole = new THREE.Path(); hole.moveTo(cx - r, 0.55); hole.lineTo(cx + r, 0.55); hole.lineTo(cx + r, 1.25);
+  hole.absarc(cx, 1.25, r, 0, Math.PI, false); hole.lineTo(cx - r, 0.55); s.holes.push(hole);
+  const g = new THREE.ExtrudeGeometry(s, { depth: z1 - z0, bevelEnabled: false, curveSegments: 32 }); g.translate(0, 0, z0);
+  solid(g);
+  box(cx - r, cx + r, 0.55, 2.6, z1 - 0.1, z1 - 0.02, model, { color: COL.stone, lines: null });
+  box(cx - r, cx + r, 0, 0.55, z0 - 0.35, z1);
+  box(cx - r + 0.05, cx + r - 0.05, 0.55, 0.68, z0 - 0.3, z1 - 0.12, model, { color: COL.cushion, lines: LINE_SOFT });
+})();
+// garden door in its box frame
+box(-3.6, -1.1, 0, 2.7, 7.5, 8.33);   // door frame box, a touch proud of the wall so faces don't z-fight
+box(-3.0, -1.7, 0, 2.25, 7.44, 7.5, model, { color: COL.door });   // courtyard side
+box(-3.0, -1.7, 0, 2.25, 8.33, 8.38, model, { color: COL.door });   // lane side
+box(-1.1, -0.6, 0, 2.7, 7.46, 8.36, model, { color: COL.stone });    // stone column beside the door frame
+
+// entrance: breeze-block screen + carport outline
+box(12.3, 12.6, 0, 2.6, -5.6, -1.8, model, { color: COL.breeze });
+box(12.3, 12.7, 0, 2.6, -9.6, -8.0);
+fill(12.3, 17, -10, 4, 0.02, COL.paver); rect(12.3, 17, -10, 4, 0.025, model, LINE_SOFT);
+
+/* ---------- roof play landscape (from the top-view sketch) ----------
+   jacuzzi under a round thatched roof (west), bamboo lookout tower, a woven rattan crawl tube
+   winding across both roofs to the slide, which drops west onto the lawn. Stair stays at the inner corner. */
+Object.assign(COL, { thatch: '#c9a66b', bamboo: '#b9945c', rattan: '#a9804a', tub: '#9a6a3e', tubWater: '#7cc6c0' });
+const play = new THREE.Group(); model.add(play);
+const DY = ROOF + 0.02;
+function rail(x0, z0, x1, z1) {
+  const len = Math.hypot(x1 - x0, z1 - z0), n = Math.max(1, Math.ceil(len / 1.5));
+  for (let i = 0; i <= n; i++) { const t = i / n, x = x0 + (x1 - x0) * t, z = z0 + (z1 - z0) * t; polyline([[x, DY, z], [x, DY + 1.2, z]], play); }
+  polyline([[x0, DY + 1.2, z0], [x1, DY + 1.2, z1]], play);
+  const g = new THREE.PlaneGeometry(len, 1.05); g.rotateY(-Math.atan2(z1 - z0, x1 - x0)); g.translate((x0 + x1) / 2, DY + 0.62, (z0 + z1) / 2);
+  play.add(new THREE.Mesh(g, F(COL.rail, { transparent: true, opacity: 0.3, depthWrite: false })));
+}
+// safety rail round the whole roof edge; gaps where the stair arrives and the slide leaves
+{ const e = 0.15, cx = 12.6 - RC, cz = 8.3 - RC;
+  rail(-10.6 + e, -2.5 - e, 2.9, -2.5 - e);                  // wing A courtyard edge (stair gap 2.9..4.5)
+  rail(4.5 + e, -2.5 - e, 4.5 + e, 4.3);                     // wing B courtyard edge (slide gap 4.3..5.5)
+  rail(4.5 + e, 5.5, 4.5 + e, 8.3 - e);
+  rail(4.5 + e, 8.3 - e, cx, 8.3 - e);
+  for (let k = 0; k < 6; k++) { const a0 = (1 - k / 6) * Math.PI / 2, a1 = (1 - (k + 1) / 6) * Math.PI / 2, r = RC - e;
+    rail(cx + Math.cos(a0) * r, cz + Math.sin(a0) * r, cx + Math.cos(a1) * r, cz + Math.sin(a1) * r); }
+  rail(12.6 - e, cz, 12.6 - e, -10.6 + e);
+  rail(12.6 - e, -10.6 + e, -10.6 + e, -10.6 + e);
+  rail(-10.6 + e, -10.6 + e, -10.6 + e, -2.5 - e); }
+
+// wooden jacuzzi under a round thatched roof
+(function jacuzzi() {
+  const x = -7.1, z = -6.8, y = DY;
+  const cyl = (r0, r1, h, y0, color, seg = 40, opts = {}) => { const g = new THREE.CylinderGeometry(r0, r1, h, seg); g.translate(x, y0 + h / 2, z); return solid(g, play, { color, angle: 30, ...opts }); };
+  cyl(2.1, 2.1, 0.18, y, COL.play);                                    // round deck
+  // open tub: outer + inner barrel walls, rim, floor, seat ledge, see-through bubbling water
+  const open = (r, h, y0, color) => { const g = new THREE.CylinderGeometry(r, r, h, 32, 1, true); g.translate(x, y0 + h / 2, z); return solid(g, play, { color, angle: 30 }); };
+  open(1.15, 0.85, y + 0.18, COL.tub); open(1.05, 0.8, y + 0.23, '#b98552');
+  { const g = new THREE.RingGeometry(1.05, 1.15, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + 1.03, z); solid(g, play, { color: COL.tub, angle: 30 }); }
+  { const g = new THREE.CircleGeometry(1.05, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + 0.24, z); solid(g, play, { color: '#a87443', lines: null }); }
+  { const g = new THREE.RingGeometry(0.75, 1.05, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + 0.55, z); solid(g, play, { color: '#b98552', angle: 30 }); }   // seat ledge
+  { const g = new THREE.CircleGeometry(1.05, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + 0.85, z);
+    const w = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: COL.tubWater, transparent: true, opacity: 0.4, depthWrite: false })); w.renderOrder = 2; play.add(w); }
+  window.__tub = { x, z, floor: y + 0.26, water: y + 0.85 };
+  for (let k = 0; k < 18; k++) { const a = k / 18 * Math.PI * 2; polyline([[x + Math.cos(a) * 1.16, y + 0.18, z + Math.sin(a) * 1.16], [x + Math.cos(a) * 1.16, y + 1.03, z + Math.sin(a) * 1.16]], play, LINE_SOFT); }
+  box(x - 0.5, x + 0.5, y + 0.18, y + 0.45, z + 1.15, z + 1.55, play, { color: COL.tub });   // step
+  for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2 + 0.3, px = x + Math.cos(a) * 1.85, pz = z + Math.sin(a) * 1.85; box(px - 0.06, px + 0.06, y + 0.18, y + 2.6, pz - 0.06, pz + 0.06, play, { color: COL.bamboo }); }
+  { const g = new THREE.ConeGeometry(2.75, 1.9, 28, 1); g.translate(x, y + 2.55 + 0.95, z); solid(g, play, { color: COL.thatch, angle: 30 }); }
+  { const g = new THREE.CylinderGeometry(2.75, 2.8, 0.25, 28, 1, true); g.translate(x, y + 2.45, z); solid(g, play, { color: '#b8945a', angle: 30 }); } // thatch fringe
+})();
+
+// bamboo lookout tower: open ground level, platform at +2.2 with railing, two-tier thatched roof, ladder on the south face
+const TW = { x0: -3.6, x1: -0.4, z0: -9.0, z1: -5.8 };
+(function tower() {
+  const { x0, x1, z0, z1 } = TW, y = DY, P = 2.2, cx = (x0 + x1) / 2;
+  box(x0, x1, y, y + 0.12, z0, z1, play, { color: COL.bamboo });
+  [[x0, z0], [x1, z0], [x0, z1], [x1, z1]].forEach(([px, pz]) => box(px - 0.08, px + 0.08, y, y + 4.3, pz - 0.08, pz + 0.08, play, { color: COL.bamboo }));
+  box(x0, x1, y + P, y + P + 0.14, z0, z1, play, { color: COL.bamboo });
+  const top = y + P + 0.14, h = 1.0;
+  const side = (a, b, gap) => {   // railing with X-bracing, optional gap [g0,g1] along the side
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = 4;
+    for (let k = 0; k < n; k++) {
+      const t0 = k / n, t1 = (k + 1) / n, m = t => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      const p0 = m(t0), p1 = m(t1);
+      if (gap && t0 >= gap[0] && t1 <= gap[1]) continue;
+      polyline([[p0[0], top + h, p0[1]], [p1[0], top + h, p1[1]]], play);
+      polyline([[p0[0], top, p0[1]], [p1[0], top + h, p1[1]]], play, LINE_SOFT); polyline([[p0[0], top + h, p0[1]], [p1[0], top, p1[1]]], play, LINE_SOFT);
+      polyline([[p1[0], top, p1[1]], [p1[0], top + h, p1[1]]], play);
+    }
+  };
+  side([x0, z0], [x1, z0]); side([x1, z0], [x1, z1]); side([x0, z1], [x0, z0]); side([x1, z1], [x0, z1], [0.25, 0.75]);
+  { const g = new THREE.ConeGeometry(3.0, 1.5, 4, 1); g.rotateY(Math.PI / 4); g.translate(cx, y + 4.3 + 0.75, (z0 + z1) / 2); solid(g, play, { color: COL.thatch }); }
+  { const g = new THREE.ConeGeometry(1.25, 1.4, 4, 1); g.rotateY(Math.PI / 4); g.translate(cx, y + 5.25 + 0.7, (z0 + z1) / 2); solid(g, play, { color: COL.thatch }); }
+  // ladder (south face, centred)
+  const lz = z1 + 0.12;
+  [cx - 0.3, cx + 0.3].forEach(lx => box(lx - 0.04, lx + 0.04, y, top, lz - 0.04, lz + 0.04, play, { color: COL.bamboo }));
+  for (let r = 0.3; r < P; r += 0.3) box(cx - 0.3, cx + 0.3, y + r, y + r + 0.04, lz - 0.03, lz + 0.03, play, { color: COL.bamboo, lines: LINE_SOFT });
+})();
+
+// trampoline in the bend of the crawl tube (wing B roof): padded frame, mat, legs, safety net open towards the stair
+(function trampoline() {
+  const x = 4.4, z = -5.6, R = 1.5, H = 0.32, y = DY;
+  const ringG = new THREE.CylinderGeometry(R, R, 0.12, 40, 1, true); ringG.translate(x, y + H, z); solid(ringG, play, { color: COL.trampRim, angle: 30 });
+  { const g = new THREE.RingGeometry(R - 0.28, R, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + H + 0.06, z); solid(g, play, { color: COL.trampRim, angle: 30 }); }   // pad
+  { const g = new THREE.CircleGeometry(R - 0.28, 40); g.rotateX(-Math.PI / 2); g.translate(x, y + H + 0.04, z); const m = solid(g, play, { color: COL.tramp, lines: null }); m.userData.tramp = true; }
+  for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2, px = x + Math.cos(a) * (R - 0.08), pz = z + Math.sin(a) * (R - 0.08); box(px - 0.04, px + 0.04, y, y + H, pz - 0.04, pz + 0.04, play, { color: COL.steel }); }
+  // net: 300° wrap, gap facing south-west (towards the stair top)
+  const gapMid = Math.atan2(-2.6 - z, 3.6 - x), gap = 1.0;
+  const netG = new THREE.CylinderGeometry(R, R, 1.6, 40, 1, true, Math.PI / 2 - gapMid + gap / 2, Math.PI * 2 - gap);   // cylinder theta: x=sin, z=cos
+  netG.translate(x, y + H + 0.86, z);
+  play.add(new THREE.Mesh(netG, F('#cfe6ee', { transparent: true, opacity: 0.28, depthWrite: false })));
+  for (let k = 0; k <= 8; k++) { const a = gapMid + gap / 2 + k / 8 * (Math.PI * 2 - gap), px = x + Math.cos(a) * R, pz = z + Math.sin(a) * R;
+    polyline([[px, y + H, pz], [px, y + H + 1.7, pz]], play); }
+  const top = []; for (let k = 0; k <= 40; k++) { const a = gapMid + gap / 2 + k / 40 * (Math.PI * 2 - gap); top.push([x + Math.cos(a) * R, y + H + 1.66, z + Math.sin(a) * R]); } polyline(top, play);
+  window.__tramp = { x, z, r: R - 0.3, y: y + H + 0.04 };
+})();
+
+// tower top floor: rug, beanbags, toy chest, toy blocks, telescope (ladder hatch + lookout spot left clear)
+(function towerTop() {
+  const y = DY + 2.2 + 0.14, cx = (TW.x0 + TW.x1) / 2;
+  { const g = new THREE.CircleGeometry(0.95, 40); g.rotateX(-Math.PI / 2); g.translate(cx, y + 0.005, -7.9); const m = new THREE.Mesh(g, F('#d9b26c')); m.receiveShadow = true; play.add(m);
+    const ring = []; for (let i = 0; i <= 48; i++) { const a = i / 48 * Math.PI * 2; ring.push([cx + Math.cos(a) * 0.95, y + 0.008, -7.9 + Math.sin(a) * 0.95]); } polyline(ring, play);
+    const ring2 = ring.map(([x, yy, z]) => [cx + (x - cx) * 0.7, yy, -7.9 + (z + 7.9) * 0.7]); polyline(ring2, play, LINE_SOFT); }
+  const bean = (x, z, color, rot) => { const g = new THREE.SphereGeometry(0.42, 12, 8); g.scale(1, 0.55, 1.05); g.rotateY(rot); g.translate(x, y + 0.22, z); solid(g, play, { color, angle: 35 }); };
+  bean(cx - 0.95, -8.45, '#e0a36a', 0.4); bean(cx + 0.95, -8.45, '#7fb7c9', -0.4);
+  box(TW.x0 + 0.15, TW.x0 + 0.75, y, y + 0.42, -6.75, -6.25, play, { color: '#a8764a' });            // toy chest
+  box(TW.x0 + 0.13, TW.x0 + 0.77, y + 0.42, y + 0.48, -6.77, -6.23, play, { color: '#8f6238' });     // lid
+  [[0, 0, '#e05a47'], [0.2, 0, '#f2c14e'], [0.1, 0.18, '#4a90d9'], [0.32, -0.12, '#3d6b47']].forEach(([dx, dy, c], i) => {   // toy blocks
+    const bx0 = TW.x1 - 0.75 + dx, bz0 = -6.55 + (i === 3 ? 0.2 : 0), by0 = y + (i === 2 ? 0.18 : 0);
+    box(bx0, bx0 + 0.18, by0, by0 + 0.18, bz0, bz0 + 0.18, play, { color: c }); });
+  // telescope on a tripod, pointing out over the north rail
+  const tx = cx, tz = -8.75, top = y + 1.05;
+  [[-0.22, 0.14], [0.22, 0.14], [0, -0.24]].forEach(([dx, dz]) => polyline([[tx + dx, y, tz + dz], [tx, top, tz]], play));
+  { const g = new THREE.CylinderGeometry(0.05, 0.065, 0.62, 16); g.rotateX(Math.PI / 2 - 0.35); g.translate(tx, top + 0.08, tz - 0.12); solid(g, play, { color: '#c9a24a', angle: 30 }); }
+})();
+
+// woven crawl tube (rattan hoops + battens + see-through skin), tower → slide; open bay mid-way to climb in and out
+const TR = 0.62;
+const TUBE_RISE = 1.8, TUBE_LIFT = i => Math.max(0, (i - 9) / 8) * TUBE_RISE;   // the last stretch climbs, so the slide starts higher and drops steeper
+const TUBE = new THREE.CatmullRomCurve3([[-0.4, -7.5], [2.3, -8.4], [3.97, -9.46], [5.57, -9.84], [7.08, -9.23], [7.62, -7.87], [7.54, -6.35], [8.07, -4.68], [9.89, -3.47],
+  [11.1, -2.55], [11.3, -1.34], [10.8, 0.03], [9.13, 0.63], [7.46, 1.24], [6.86, 2.61], [6.86, 3.97], [6.2, 4.8], [5.6, 4.95]].map(([x, z], i) => new THREE.Vector3(x, DY + TR + TUBE_LIFT(i), z)));
+(function tube() {
+  const len = TUBE.getLength(), n = Math.round(len / 0.55), up = new THREE.Vector3(0, 1, 0);
+  const frame = u => { const p = TUBE.getPointAt(u), t = TUBE.getTangentAt(u), s = new THREE.Vector3().crossVectors(t, up).normalize(); return { p, t, s }; };
+  const ringPt = (f, a, r = TR) => f.p.clone().addScaledVector(f.s, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r).toArray();
+  const OPEN = [0.47, 0.53];  // mid-way bay: hoops only, no skin, low side opening
+  for (let i = 0; i <= n; i++) {
+    const f = frame(i / n), pts = [];
+    for (let k = 0; k <= 24; k++) pts.push(ringPt(f, k / 24 * Math.PI * 2));
+    polyline(pts, play, i % 3 ? LINE_SOFT : LINE);
+    const tg = new THREE.TorusGeometry(TR, 0.035, 5, 24); const m = new THREE.Mesh(tg, F(COL.rattan));
+    m.position.copy(f.p); m.lookAt(f.p.clone().add(f.t)); m.castShadow = true; play.add(m);
+  }
+  for (let k = 0; k < 8; k++) {   // battens over the top 3/4
+    const a = -0.6 + k / 7 * (Math.PI + 1.2), pts = [];
+    for (let i = 0; i <= n * 2; i++) pts.push(ringPt(frame(i / (n * 2)), a));
+    polyline(pts, play, LINE_SOFT);
+  }
+  const skin = (u0, u1) => {
+    const pts = []; for (let i = 0; i <= 60; i++) pts.push(TUBE.getPointAt(u0 + (u1 - u0) * i / 60));
+    const g = new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 160, TR - 0.01, 18, false);
+    const m = new THREE.Mesh(g, F(COL.rattan, { transparent: true, opacity: 0.45, depthWrite: false })); m.castShadow = true; play.add(m);
+  };
+  skin(0, OPEN[0]); skin(OPEN[1], 1);
+  // bamboo posts under the raised stretch
+  for (let i = 0; i <= n; i += 2) { const f = frame(i / n), bottom = f.p.y - TR;
+    if (bottom - DY > 0.12) [-1, 1].forEach(sd => { const px = f.p.x + f.s.x * sd * (TR - 0.1), pz = f.p.z + f.s.z * sd * (TR - 0.1); box(px - 0.05, px + 0.05, DY, bottom + 0.05, pz - 0.05, pz + 0.05, play, { color: COL.bamboo }); }); }
+  // woven floor mat inside
+  const L = [], R = [];
+  for (let i = 0; i <= 120; i++) { const f = frame(i / 120); L.push(ringPt(f, -Math.PI / 2 - 0.9)); R.push(ringPt(f, -Math.PI / 2 + 0.9)); }
+  const pos = [], idx = []; L.forEach((l, i) => pos.push(...l, ...R[i])); for (let i = 0; i < 120; i++) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+  const fg = new THREE.BufferGeometry(); fg.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); fg.setIndex(idx); fg.computeVertexNormals();
+  const fm = new THREE.Mesh(fg, F(COL.rattan)); fm.receiveShadow = true; play.add(fm);
+})();
+
+// slide: leaves wing B's courtyard edge at the end of the tube, runs west over lawn + deck and drops into the pool
+const SR = 0.45;   // tube-slide radius
+const SLIDE = new THREE.CatmullRomCurve3([[5.85, DY + TUBE_RISE + SR, 4.93], [5.1, DY + TUBE_RISE + 0.3, 4.97], [4.0, DY + 1.3, 5.05], [2.8, 3.9, 5.1], [0.5, 2.5, 5.4], [-2.5, 1.45, 5.6], [-5.0, 0.95, 5.7], [-6.9, 0.55, 5.7]].map(p => new THREE.Vector3(...p)));
+(function slide() {   // closed tube slide: solid orange bottom half, clear glass top half
+  const c = SLIDE, up = new THREE.Vector3(0, 1, 0), N = 160, M = 12;
+  const fr = u => { const p = c.getPointAt(u), t = c.getTangentAt(u), sd = new THREE.Vector3().crossVectors(t, up).normalize(), nu = new THREE.Vector3().crossVectors(sd, t).normalize(); return { p, sd, nu }; };
+  const at = (f, a, r = SR) => f.p.clone().addScaledVector(f.sd, Math.cos(a) * r).addScaledVector(f.nu, Math.sin(a) * r);
+  const half = (a0, a1, mat) => {
+    const pos = [], idx = [];
+    for (let i = 0; i <= N; i++) { const f = fr(i / N); for (let j = 0; j <= M; j++) pos.push(...at(f, a0 + (a1 - a0) * j / M).toArray()); }
+    for (let i = 0; i < N; i++) for (let j = 0; j < M; j++) { const a = i * (M + 1) + j, b = a + M + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
+    const m = new THREE.Mesh(g, mat); m.castShadow = true; m.receiveShadow = true; play.add(m); return m;
+  };
+  half(Math.PI, Math.PI * 2, F(COL.slide));                                                            // bottom: solid orange
+  const glass = half(0, Math.PI, F(COL.rail, { transparent: true, opacity: 0.28, depthWrite: false })); glass.renderOrder = 2;   // top: glass
+  const len = c.getLength(), n = Math.round(len / 1.0);
+  for (let i = 0; i <= n; i++) { const f = fr(i / n), pts = []; for (let k = 0; k <= 24; k++) pts.push(at(f, k / 24 * Math.PI * 2).toArray()); polyline(pts, play, i === 0 || i === n ? LINE : LINE_SOFT); }
+  [0, Math.PI].forEach(a => { const pts = []; for (let i = 0; i <= 120; i++) pts.push(at(fr(i / 120), a).toArray()); polyline(pts, play); });   // glass/orange seams
+  [[2.8, 5.1], [0.5, 5.4], [-2.5, 5.6], [-5.0, 5.7]].forEach(([x, z]) => { const p = SLIDE.getPoints(200).reduce((b, q) => Math.abs(q.x - x) < Math.abs(b.x - x) ? q : b); box(x - 0.05, x + 0.05, 0, p.y - SR, z - 0.05, z + 0.05, play, { color: COL.steel }); });
+})();
+
+// steel stair from the courtyard up to wing A's roof edge (tops out at the edge, clear of the soffit)
+const ST = { x0: 3.0, x1: 4.2, zTop: -2.6, zBot: 3.7 };
+(function stair() {
+  const { x0, x1, zTop, zBot } = ST, n = 20, rise = DY / n, run = (zBot - zTop) / n;
+  for (let i = 0; i < n; i++) { const y = rise * (n - i), z = zTop + i * run; box(x0, x1, y - 0.05, y, z, z + run, play, { color: COL.play, lines: LINE_SOFT }); }
+  [x0, x1].forEach(x => { polyline([[x, DY, zTop], [x, 0, zBot]], play); polyline([[x, DY + 1, zTop], [x, 1, zBot]], play); });
+  // glass guards along both sides of the flight
+  [x0 - 0.04, x1 + 0.04].forEach(x => {
+    const v = [x, 0.05, zBot, x, DY, zTop, x, DY + 1, zTop, x, 1.05, zBot];
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3)); g.setIndex([0, 1, 2, 0, 2, 3]); g.computeVertexNormals();
+    play.add(new THREE.Mesh(g, F(COL.rail, { transparent: true, opacity: 0.3, depthWrite: false })));
+    polyline([[x, 0.05, zBot], [x, 1.05, zBot]], play);
+  });
+  // gate at the foot: two posts + a framed glass leaf hinged on the west post
+  const gz = zBot + 0.25;
+  [x0 - 0.04, x1 + 0.04].forEach(x => box(x - 0.04, x + 0.04, 0, 1.15, gz - 0.04, gz + 0.04, play, { color: COL.steel }));
+  [x0 - 0.04, x1 + 0.04].forEach(x => polyline([[x, 0.05, zBot], [x, 0.05, gz], [x, 1.05, gz], [x, 1.05, zBot]], play));
+  const leaf = new THREE.Group(); leaf.position.set(x0 - 0.04, 0, gz); play.add(leaf);
+  const w = x1 - x0 + 0.08;
+  box(0, w, 0.08, 0.12, -0.02, 0.02, leaf, { color: COL.steel }); box(0, w, 1.04, 1.08, -0.02, 0.02, leaf, { color: COL.steel });
+  box(w - 0.04, w, 0.08, 1.08, -0.02, 0.02, leaf, { color: COL.steel });
+  { const g = new THREE.PlaneGeometry(w - 0.04, 0.92); g.translate((w - 0.04) / 2, 0.58, 0); leaf.add(new THREE.Mesh(g, F(COL.rail, { transparent: true, opacity: 0.35, depthWrite: false }))); }
+  window.__gate = { leaf, x: (x0 + x1) / 2, z: gz, open: 0 };
+})();
+
+/* ---------- simple planting: palms outside, banana clumps inside the walls ---------- */
+function palm(x, z, h, lean) {
+  const c = new THREE.CatmullRomCurve3([new THREE.Vector3(x, 0, z), new THREE.Vector3(x + lean * 0.3, h * 0.5, z), new THREE.Vector3(x + lean, h, z + lean * 0.3)]);
+  solid(new THREE.TubeGeometry(c, 12, 0.17, 6), model, { color: COL.trunk, lines: null });
+  for (let i = 0; i < 9; i++) {
+    const a = i / 9 * Math.PI * 2, g = new THREE.ConeGeometry(0.35, 3.4, 4);
+    g.translate(0, 1.7, 0); g.scale(1, 1, 0.25);
+    const m = new THREE.Mesh(g, F(COL.palm)); m.position.set(x + lean, h, z + lean * 0.3);
+    m.rotation.set(0, a, 0); m.rotateX(1.2); m.castShadow = true; model.add(m);
+  }
+}
+[[-15, -6, 9, 0.6], [-6, -15, 10, 0.8], [5, -16, 8.5, -0.5], [16, -13, 9.5, 0.6], [20, 2, 8, -0.5], [-17, 6, 8.5, -0.4]]
+  .forEach(([x, z, h, l]) => palm(x, z, h, l));
+function clump(x, z, s) {
+  const g = new THREE.IcosahedronGeometry(0.75 * s, 0); g.scale(1, 1.5, 1);
+  const m = new THREE.Mesh(g, F(COL.leaf)); m.position.set(x, 1.05 * s, z); m.rotation.y = x * 7 + z; m.castShadow = m.receiveShadow = true; model.add(m);
+}
+for (let z = -2.2; z < 6.8; z += 1.1) clump(-10.0, z, 1 + ((z * 13) % 3) * 0.08);
+for (let z = -1.6; z < 7.4; z += 3.2) clump(4.3, z + 1.2, 0.7);   // small clumps along the bedroom terrace
+
+/* ---------- three kids: lawn → stair → trampoline → slide → lawn, on a loop ---------- */
+// three original cartoon pups (box style, flat colour + black edges)
+const PUPS = [
+  { fur: '#e9d6ad', muzzle: '#f6ecd8', ear: '#a8784a', ears: 'floppy', shirt: '#e05a47', shorts: '#2f4a6d' },
+  { fur: '#7a5236', muzzle: '#d9b48a', ear: '#5a3a24', ears: 'pointy', shirt: '#f2c14e', shorts: '#3d6b47' },
+  { fur: '#cfcac2', muzzle: '#f2efe9', ear: '#3a3836', ears: 'floppy', shirt: '#4a90d9', shorts: '#6b4f3a' },
+];
+// original rounded monkey: smooth parts with a black back-face outline shell (matches the edge-line look)
+const OUTLINE = new THREE.MeshBasicMaterial({ color: 0x1a1a1a, side: THREE.BackSide });
+function makeMonkey() {
+  const g = new THREE.Group(), body = new THREE.Group(); g.add(body);
+  const FUR = '#c9822f', FACE = '#f3d9b1', SH = '#3d6b47';
+  const round = (geo, color, parent, x, y, z, sx = 1, sy = 1, sz = 1, ol = 0.035) => {
+    const m = new THREE.Mesh(geo, F(color)); m.position.set(x, y, z); m.scale.set(sx, sy, sz); m.castShadow = true; m.receiveShadow = true; parent.add(m);
+    geo.computeBoundingSphere(); const r = geo.boundingSphere.radius, k = 1 + ol / r;
+    const o = new THREE.Mesh(geo, OUTLINE); o.scale.setScalar(k); m.add(o); return m;
+  };
+  const S = (r, w = 20, h = 14) => new THREE.SphereGeometry(r, w, h);
+  round(S(0.17), FUR, body, 0, 0.8, 0, 1, 1.25, 0.9);                 // body
+  round(S(0.12), FACE, body, 0, 0.79, 0.07, 1, 1.25, 0.6, 0.02);      // tummy
+  round(new THREE.CylinderGeometry(0.16, 0.17, 0.13, 20), SH, body, 0, 0.6, 0);   // shorts
+  round(S(0.16), FUR, body, 0, 1.15, 0);                              // head
+  round(S(0.115), FACE, body, 0, 1.12, 0.08, 1.15, 0.95, 0.8, 0.02);  // face
+  round(S(0.06), FACE, body, 0, 1.07, 0.16, 1.3, 0.8, 0.8, 0.015);    // muzzle
+  [-1, 1].forEach(sd => {
+    round(S(0.065), FUR, body, sd * 0.17, 1.17, -0.01, 0.5, 1, 1);    // ears
+    round(S(0.04), FACE, body, sd * 0.19, 1.17, 0.0, 0.4, 0.8, 0.8, 0.01);
+    round(S(0.032, 12, 10), '#ffffff', body, sd * 0.05, 1.16, 0.175, 1, 1, 0.6, 0.008);   // eyes
+    round(S(0.017, 10, 8), '#1a1a1a', body, sd * 0.05, 1.16, 0.195, 1, 1, 0.6, 0.001);
+  });
+  // long curly tail
+  const tail = new THREE.Group(); tail.position.set(0, 0.62, -0.13); body.add(tail);
+  const tc = new THREE.CatmullRomCurve3([[0, 0, 0], [0, 0.05, -0.18], [0, 0.22, -0.32], [0, 0.42, -0.3], [0, 0.48, -0.16], [0, 0.38, -0.1]].map(p => new THREE.Vector3(...p)));
+  round(new THREE.TubeGeometry(tc, 30, 0.028, 8), FUR, tail, 0, 0, 0, 1, 1, 1, 0.012);
+  const limb = (x, y, len, r) => { const pv = new THREE.Group(); pv.position.set(x, y, 0); body.add(pv);
+    const geo = new THREE.CapsuleGeometry(r, len - 2 * r, 4, 10); geo.translate(0, -len / 2, 0);
+    const m = new THREE.Mesh(geo, F(FUR)); m.castShadow = true; pv.add(m); const o = new THREE.Mesh(geo, OUTLINE); o.scale.set(1 + 0.03 / r, 1.04, 1 + 0.03 / r); pv.add(o); return pv; };
+  const legL = limb(-0.08, 0.55, 0.47, 0.055), legR = limb(0.08, 0.55, 0.47, 0.055);
+  const armL = limb(-0.2, 0.96, 0.42, 0.045), armR = limb(0.2, 0.96, 0.42, 0.045);
+  g.userData = { body, legL, legR, armL, armR, tail, yaw: 0, prev: null, outline: true };
+  model.add(g); return g;
+}
+// original rounded piglet, same outline-shell technique as the monkey
+function makePiglet() {
+  const g = new THREE.Group(), body = new THREE.Group(); g.add(body);
+  const SKIN = '#f2b7a6', DARK = '#d98c7a', SUIT = '#f2c14e';
+  const round = (geo, color, parent, x, y, z, sx = 1, sy = 1, sz = 1, ol = 0.035) => {
+    const m = new THREE.Mesh(geo, F(color)); m.position.set(x, y, z); m.scale.set(sx, sy, sz); m.castShadow = true; m.receiveShadow = true; parent.add(m);
+    geo.computeBoundingSphere(); const o = new THREE.Mesh(geo, OUTLINE); o.scale.setScalar(1 + ol / geo.boundingSphere.radius); m.add(o); return m;
+  };
+  const S = (r, w = 20, h = 14) => new THREE.SphereGeometry(r, w, h);
+  round(S(0.19), SUIT, body, 0, 0.78, 0, 1, 1.15, 0.95);               // round overalls body
+  round(S(0.18), SKIN, body, 0, 1.13, 0, 1.05, 0.95, 1);               // head
+  const sn = new THREE.CylinderGeometry(0.07, 0.075, 0.08, 20); sn.rotateX(Math.PI / 2);
+  round(sn, DARK, body, 0, 1.09, 0.18, 1, 0.85, 1, 0.015);             // snout
+  [-1, 1].forEach(sd => {
+    round(S(0.016, 10, 8), '#7a3e34', body, sd * 0.025, 1.09, 0.222, 1, 1, 0.4, 0.002);   // nostrils
+    const ear = new THREE.ConeGeometry(0.06, 0.12, 12); ear.rotateZ(sd * -0.5); ear.rotateX(0.5);
+    round(ear, SKIN, body, sd * 0.12, 1.28, 0.0, 1, 1, 0.5, 0.015);   // floppy pointed ears
+    round(S(0.03, 12, 10), '#ffffff', body, sd * 0.065, 1.18, 0.16, 1, 1, 0.6, 0.008);    // eyes
+    round(S(0.016, 10, 8), '#1a1a1a', body, sd * 0.065, 1.18, 0.178, 1, 1, 0.6, 0.001);
+    round(S(0.03, 10, 8), '#ee9a95', body, sd * 0.12, 1.08, 0.14, 1, 0.7, 0.5, 0.001);     // cheeks
+  });
+  const tail = new THREE.Group(); tail.position.set(0, 0.68, -0.17); body.add(tail);
+  const pts = []; for (let k = 0; k <= 24; k++) { const a = k / 24 * Math.PI * 3; pts.push(new THREE.Vector3(Math.cos(a) * 0.04, Math.sin(a) * 0.04 + k * 0.003, -k * 0.006)); }
+  round(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.013, 6), SKIN, tail, 0, 0, 0, 1, 1, 1, 0.006);
+  const limb = (x, y, len, r, color) => { const pv = new THREE.Group(); pv.position.set(x, y, 0); body.add(pv);
+    const geo = new THREE.CapsuleGeometry(r, len - 2 * r, 4, 10); geo.translate(0, -len / 2, 0);
+    const m = new THREE.Mesh(geo, F(color)); m.castShadow = true; pv.add(m); const o = new THREE.Mesh(geo, OUTLINE); o.scale.set(1 + 0.03 / r, 1.04, 1 + 0.03 / r); pv.add(o); return pv; };
+  const legL = limb(-0.085, 0.56, 0.48, 0.06, SKIN), legR = limb(0.085, 0.56, 0.48, 0.06, SKIN);
+  const armL = limb(-0.21, 0.95, 0.4, 0.05, SKIN), armR = limb(0.21, 0.95, 0.4, 0.05, SKIN);
+  g.userData = { body, legL, legR, armL, armR, tail, yaw: 0, prev: null, outline: true };
+  model.add(g); return g;
+}
+function makeKid(i) {
+  if (i === 0) return makePiglet();
+  if (i === 1) return makeMonkey();
+  const P = PUPS[i], g = new THREE.Group();
+  const part = (w, h, d, x, y, z, color, parent, hang = false) => {
+    const geo = new THREE.BoxGeometry(w, h, d); geo.translate(x, hang ? y - h / 2 : y, z);
+    return solid(geo, parent, { color, lines: LINE });
+  };
+  const body = new THREE.Group(); g.add(body);
+  part(0.3, 0.34, 0.18, 0, 0.8, 0, P.shirt, body);
+  part(0.3, 0.14, 0.19, 0, 0.58, 0, P.shorts, body);
+  part(0.26, 0.24, 0.24, 0, 1.12, 0, P.fur, body);                         // head
+  part(0.14, 0.11, 0.12, 0, 1.07, 0.17, P.muzzle, body);                   // snout
+  part(0.06, 0.045, 0.03, 0, 1.11, 0.24, '#1d1d1d', body);                 // nose
+  [-0.06, 0.06].forEach(x => part(0.035, 0.035, 0.02, x, 1.16, 0.125, '#1d1d1d', body));   // eyes
+  [-1, 1].forEach(sd => P.ears === 'pointy'
+    ? part(0.07, 0.15, 0.05, sd * 0.08, 1.31, -0.02, P.ear, body)
+    : part(0.06, 0.18, 0.11, sd * 0.155, 1.13, -0.01, P.ear, body));
+  const tail = new THREE.Group(); tail.position.set(0, 0.6, -0.1); tail.rotation.x = -0.7; body.add(tail);
+  part(0.05, 0.05, 0.26, 0, 0, -0.13, P.fur, tail);
+  const limb = (x, y, len, w, color) => { const pv = new THREE.Group(); pv.position.set(x, y, 0); body.add(pv); part(w, len, w, 0, 0, 0, color, pv, true); return pv; };
+  const legL = limb(-0.075, 0.52, 0.48, 0.11, P.fur), legR = limb(0.075, 0.52, 0.48, 0.11, P.fur);
+  const armL = limb(-0.195, 0.95, 0.38, 0.08, P.fur), armR = limb(0.195, 0.95, 0.38, 0.08, P.fur);
+  g.userData = { body, legL, legR, armL, armR, tail, yaw: 0, prev: null };
+  model.add(g); return g;
+}
+// path segments: walk / climb polylines at a speed, bounce on the spot, slide along SLIDE
+const Y0 = 0.05;
+const TX = (TW.x0 + TW.x1) / 2, TZ1 = TW.z1, PLAT = DY + 2.2 + 0.14;
+const tubePts = TUBE.getSpacedPoints(160).map(p => [p.x, p.y - TR + 0.02, p.z]);   // tube floor, incl. the climb
+const ROUTE = [
+  { type: 'plunge', dur: 1.3, pts: [[-7.1, -0.05, 5.7], [-7.5, -0.95, 5.6], [-7.4, -0.12, 5.25]] },
+  { type: 'swim', dur: 3.4, pts: [[-7.4, -0.12, 5.25], [-7.0, -0.12, 4.6], [-6.75, -0.12, 3.9]] },
+  { type: 'climb', dur: 1.0, yaw: Math.PI / 2, pts: [[-6.75, -0.12, 3.9], [-6.0, 0.16, 3.9]] },
+  { type: 'walk', speed: 1.3, pts: [[-6.0, 0.16, 3.9], [-4.0, 0.16, 3.6], [-1.0, Y0, 3.4], [2.0, Y0, 4.6], [3.6, Y0, 4.6], [3.6, Y0, 4.2]] },
+  { type: 'climb', dur: 5.5, pts: [[3.6, Y0, 4.0], [3.6, DY, -2.5]] },
+  { type: 'walk', speed: 1.4, pts: [[3.6, DY, -2.8], [3.6, DY, -3.6], [4.0, DY + 0.36, -4.7], [4.4, DY + 0.36, -5.6]] },
+  { type: 'bounce', dur: 3.2, at: [4.4, DY + 0.36, -5.6] },
+  { type: 'walk', speed: 1.4, pts: [[4.4, DY + 0.36, -5.6], [4.0, DY + 0.36, -4.7], [3.0, DY, -4.2], [1.2, DY, -4.4], [TX, DY, TZ1 + 0.45]] },
+  { type: 'climb', dur: 2.6, yaw: Math.PI, pts: [[TX, DY, TZ1 + 0.35], [TX, PLAT, TZ1 + 0.35]] },
+  { type: 'walk', speed: 1.0, pts: [[TX, PLAT, TZ1 + 0.35], [TX, PLAT, TZ1 - 0.9]] },
+  { type: 'idle', dur: 2.2, yaw: 0, at: [TX, PLAT, TZ1 - 0.9] },
+  { type: 'walk', speed: 1.0, pts: [[TX, PLAT, TZ1 - 0.9], [TX, PLAT, TZ1 + 0.35]] },
+  { type: 'climb', dur: 2.0, yaw: Math.PI, pts: [[TX, PLAT, TZ1 + 0.35], [TX, DY, TZ1 + 0.35]] },
+  { type: 'walk', speed: 1.3, pts: [[TX, DY, TZ1 + 0.45], [-4.5, DY, -4.6], [-7.1, DY, -4.4]] },
+  { type: 'climb', dur: 0.8, yaw: Math.PI, pts: [[-7.1, DY, -4.4], [-7.1, DY + 0.45, -5.3]] },
+  { type: 'climb', dur: 1.3, yaw: Math.PI, pts: [[-7.1, DY + 0.45, -5.3], [-7.1, DY + 1.05, -5.75], [-7.1, DY + 0.05, -6.45]] },
+  { type: 'soak', dur: 4.5, yaw: 0, at: [-7.1, DY + 0.05, -6.55] },
+  { type: 'climb', dur: 1.6, yaw: 0, pts: [[-7.1, DY + 0.05, -6.45], [-7.1, DY + 1.05, -5.75], [-7.1, DY + 0.45, -5.3], [-7.1, DY, -4.4]] },
+  { type: 'walk', speed: 1.4, pts: [[-7.1, DY, -4.4], [-0.15, DY, -5.3], [-0.15, DY, -7.5]] },
+  { type: 'crawl', speed: 1.7, pts: tubePts },
+  { type: 'slide', dur: 1.8 },   // sucked through the tube slide
+];
+const plen = pts => pts.slice(1).reduce((a, p, i) => a + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1], p[2] - pts[i][2]), 0);
+ROUTE.forEach(r => { if (!r.dur) r.dur = plen(r.pts) / r.speed; });
+const LOOP = ROUTE.reduce((a, r) => a + r.dur, 0);
+function along(pts, u) {
+  const L = plen(pts) * u; let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i], l = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    if (acc + l >= L || i === pts.length - 1) { const k = l ? Math.min(1, (L - acc) / l) : 0; return new THREE.Vector3(a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k); }
+    acc += l;
+  }
+}
+const kids = [0, 1, 2].map(makeKid);
+function updateKid(k, t) {
+  let r, u = ((t % LOOP) + LOOP) % LOOP;
+  for (r of ROUTE) { if (u < r.dur) break; u -= r.dur; }
+  const f = u / r.dur, d = k.userData, pos = new THREE.Vector3();
+  let swing = 0, legs = 0, arms = 0, armsUp = 0, lean = 0;
+  if (r.type === 'walk' || r.type === 'climb' || r.type === 'crawl' || r.type === 'swim' || r.type === 'plunge') {
+    pos.copy(along(r.pts, f));
+    const rate = r.type === 'walk' ? 8 : 9; swing = Math.sin(t * rate) * (r.type === 'walk' ? 0.55 : 0.75);
+    if (r.type === 'climb') { lean = 0.15; armsUp = 2.6 + swing * 0.5; }
+    if (r.type === 'plunge') { lean = 0.4; legs = 0.3; armsUp = 2.9; if (d.seg !== r) splash(r.pts[0][0], r.pts[0][2]); }
+    if (r.type === 'swim') { lean = 1.35; legs = 1.2 + swing * 0.3; armsUp = 2.6 + swing * 1.2; }   // front crawl, head above water
+    if (r.type === 'crawl') { lean = 1.25; legs = 1.25; armsUp = 1.25 + swing * 0.4; pos.y += 0.3; }   // hands-and-knees: limbs straight down under a level body
+  } else if (r.type === 'soak') {
+    pos.set(r.at[0], r.at[1] + Math.sin(t * 2) * 0.02, r.at[2]); legs = 1.45; armsUp = Math.sin(t * 2.5) > 0.7 ? 2.6 : 0;   // sits on the ledge, splashes now and then
+  } else if (r.type === 'idle') {
+    pos.set(...r.at); armsUp = Math.sin(t * 3) > 0.6 ? 2.8 : 0;   // waves from the lookout
+  } else if (r.type === 'bounce') {
+    const b = Math.abs(Math.sin(f * Math.PI * 4));
+    pos.set(r.at[0], r.at[1] + b * 0.9, r.at[2]); armsUp = 2.6 + Math.sin(f * 50) * 0.3; legs = (1 - b) * 0.3;
+  } else { // slide: accelerate, sit in the channel, arms up
+    const e = f * f * (1.4 - 0.4 * f);
+    const p = SLIDE.getPointAt(Math.min(1, e));
+    pos.set(p.x, p.y - SR + 0.12, p.z); lean = -1.35; legs = 0; armsUp = 3.0;   // lying back, feet first
+  }
+  // face the direction of travel (smoothed), stay put on bounce
+  if (r.yaw !== undefined) { let da = r.yaw - d.yaw; da = Math.atan2(Math.sin(da), Math.cos(da)); d.yaw += da * 0.25; }
+  else if (d.prev && r.type !== 'bounce') {
+    const dx = pos.x - d.prev.x, dz = pos.z - d.prev.z;
+    if (dx * dx + dz * dz > 1e-6) { const target = Math.atan2(dx, dz); let da = target - d.yaw; da = Math.atan2(Math.sin(da), Math.cos(da)); d.yaw += da * 0.25; }
+  }
+  d.prev = pos.clone(); d.seg = r;
+  k.position.copy(pos); k.rotation.y = d.yaw; d.body.rotation.x = lean; d.body.position.y = 0;
+  d.tail.rotation.y = Math.sin(t * 14) * 0.5;   // wag
+  d.legL.rotation.x = -legs + swing; d.legR.rotation.x = -legs - swing;
+  d.armL.rotation.x = armsUp ? -armsUp : -swing * 0.9; d.armR.rotation.x = armsUp ? -armsUp - (r.type === 'bounce' ? 0.3 : 0) : swing * 0.9;
+}
+// splash: droplet burst + spreading ring on the water
+const drops = [], rings = [];
+const dropGeo = new THREE.BoxGeometry(0.07, 0.07, 0.07), dropMat = new THREE.MeshLambertMaterial({ color: '#e9fbf8' });
+function splash(x, z, size = 1) {
+  for (let i = 0; i < Math.round(28 * size); i++) {
+    const m = new THREE.Mesh(dropGeo, dropMat), a = Math.random() * Math.PI * 2, sp = (0.8 + Math.random() * 1.6) * Math.sqrt(size);
+    m.position.set(x, 0.05, z); m.userData = { noCollide: true, v: new THREE.Vector3(Math.cos(a) * sp, (2.2 + Math.random() * 2.2) * Math.sqrt(size), Math.sin(a) * sp), life: 1 };
+    model.add(m); drops.push(m);
+  }
+  const g = new THREE.RingGeometry(0.2, 0.32, 40); g.rotateX(-Math.PI / 2);
+  const ring = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.85, depthWrite: false }));
+  ring.position.set(x, 0.03, z); ring.renderOrder = 3; ring.userData = { life: 1, noCollide: true }; model.add(ring); rings.push(ring);
+}
+function updateSplash(dt) {
+  for (let i = drops.length - 1; i >= 0; i--) { const m = drops[i], u = m.userData;
+    u.v.y -= 9.8 * dt; m.position.addScaledVector(u.v, dt); u.life -= dt;
+    if (m.position.y < 0.02 || u.life <= 0) { model.remove(m); drops.splice(i, 1); } }
+  for (let i = rings.length - 1; i >= 0; i--) { const r = rings[i], u = r.userData;
+    u.life -= dt * 0.7; const s = 1 + (1 - u.life) * 6; r.scale.set(s, 1, s); r.material.opacity = Math.max(0, u.life) * 0.85;
+    if (u.life <= 0) { model.remove(r); r.geometry.dispose(); r.material.dispose(); rings.splice(i, 1); } }
+}
+// jacuzzi bubbles: small spheres rising from the floor, popping at the surface
+const bubbles = [];
+{ const T = window.__tub, bg = new THREE.SphereGeometry(0.035, 8, 6), bm = new THREE.MeshLambertMaterial({ color: '#ffffff', transparent: true, opacity: 0.85 });
+  for (let i = 0; i < 70; i++) { const m = new THREE.Mesh(bg, bm), a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * 0.95;
+    m.position.set(T.x + Math.cos(a) * r, T.floor + Math.random() * (T.water - T.floor), T.z + Math.sin(a) * r); m.userData.v = 0.35 + Math.random() * 0.5; m.userData.noCollide = true; model.add(m); bubbles.push(m); } }
+function updateBubbles(dt) { const T = window.__tub;
+  bubbles.forEach(b => { b.position.y += b.userData.v * dt; b.position.x += Math.sin(b.position.y * 9 + b.userData.v * 20) * 0.003;
+    const k = (b.position.y - T.floor) / (T.water - T.floor); b.scale.setScalar(0.6 + k * 0.8);
+    if (b.position.y > T.water) { const a = Math.random() * Math.PI * 2, r = Math.sqrt(Math.random()) * 0.95; b.position.set(T.x + Math.cos(a) * r, T.floor, T.z + Math.sin(a) * r); } }); }
+let kidTime = 0;
+/* ---------- play mode: click a pup to drive it with the arrows, click elsewhere to let go ---------- */
+const LINE_HL = new LineMaterial({ color: 0xff7a1a, linewidth: 3.2 });
+const hlRing = (() => { const g = new THREE.RingGeometry(0.38, 0.5, 40); g.rotateX(-Math.PI / 2);
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: '#ff7a1a', transparent: true, opacity: 0.9, depthWrite: false })); m.renderOrder = 4; m.visible = false; scene.add(m); return m; })();
+let ctrl = null;                       // the pup being driven
+const keys = new Set();
+const ray = new THREE.Raycaster();
+let groundMeshes = null, wallMeshes = null;
+function buildGround() {   // floors = opaque surfaces; walls also include glass rails, tube skin and hoops
+  const kidSet = new Set(); kids.forEach(k => k.traverse(o => kidSet.add(o)));
+  groundMeshes = [ground]; wallMeshes = [];
+  model.traverse(o => {
+    if (!o.isMesh || o.isLineSegments2 || o.isLine2 || kidSet.has(o) || o.userData.noCollide) return;   // fat lines are Meshes too
+    const glassy = o.material.transparent, hoop = o.geometry.type === 'TorusGeometry';
+    if (!glassy && !hoop) groundMeshes.push(o);
+    if (!hoop && (o.geometry.type !== 'PlaneGeometry' || o.material.transparent)) wallMeshes.push(o);   // skip flat ground patches + decorative hoops
+  });
+}
+// inside the crawl tube? (horizontal distance to the centreline, at roof level)
+const tubeSamples = TUBE.getSpacedPoints(300);
+const inTube = p => tubeSamples.some(q => (q.x - p.x) ** 2 + (q.z - p.z) ** 2 < (TR - 0.15) ** 2 && Math.abs(p.y - (q.y - TR)) < 0.4);
+const OUTLINE_HL = new THREE.MeshBasicMaterial({ color: 0xff7a1a, side: THREE.BackSide });
+function setLines(k, mat) { const hl = mat === LINE_HL; k.traverse(o => { if (o.isLineSegments2) o.material = mat; else if (o.isMesh && (o.material === OUTLINE || o.material === OUTLINE_HL)) o.material = hl ? OUTLINE_HL : OUTLINE; }); }
+function select(k) {
+  if (ctrl === k) return; if (ctrl) release();
+  ctrl = k; hlRing.visible = true; syncHeads();   // highlight = ring only
+  const d = k.userData; d.vy = 0; d.free = true; d.camDist = 12; d.lockT = 1.4; d.cam = null; controls.enableDamping = false;   // camera swings behind for the first moments
+  if (!groundMeshes) buildGround();
+}
+function release() { if (!ctrl) return; setTimeout(syncHeads); controls.enableDamping = true; ctrl.userData.free = false; ctrl = null; hlRing.visible = false; }
+const inPool = (x, z) => x > P.x0 && x < P.x1 && z > P.z0 && z < P.z1;
+function floorAt(x, y, z) {            // highest surface at or below y + step height
+  ray.set(new THREE.Vector3(x, y + 0.55, z), new THREE.Vector3(0, -1, 0)); ray.far = 60;
+  const h = ray.intersectObjects(groundMeshes, false)[0]; return h ? h.point.y : -PD;
+}
+function blocked(from, dir) {          // a wall in the way at knee and chest height
+  for (const hgt of [0.45, 0.9]) {   // above step-up height (trampoline frame, coping), below the tube roof
+    ray.set(new THREE.Vector3(from.x, from.y + hgt, from.z), dir); ray.far = 0.32;
+    if (ray.intersectObjects(wallMeshes, false).length) return true; }
+  return false;
+}
+let ctrlTime = 0, camDragging = false;
+controls.addEventListener('start', () => { camDragging = true; });
+controls.addEventListener('end', () => { camDragging = false;
+  if (ctrl && ctrl.userData.cam) { sph.setFromVector3(camera.position.clone().sub(controls.target)); Object.assign(ctrl.userData.cam, { theta: sph.theta, phi: sph.phi, radius: sph.radius, base: sph.phi }); ctrl.userData.camDist = sph.radius; ctrl.userData.lockT = 0; } });
+const SLIDE_LEN = SLIDE.getLength();
+function rideSlide(k, dt) {   // returns true while the driven character is on the slide
+  const d = k.userData;
+  d.slideCool = Math.max(0, (d.slideCool || 0) - dt);
+  if (d.slideU === undefined && !d.slideCool) {
+    for (let u = 0; u <= 0.12; u += 0.03) { const q = SLIDE.getPointAt(u);
+      if ((q.x - k.position.x) ** 2 + (q.z - k.position.z) ** 2 < 0.45 ** 2 && Math.abs(k.position.y - (q.y - SR)) < 0.6) { d.slideU = u; d.slideV = 3; break; } }
+  }
+  if (d.slideU === undefined) return false;
+  d.slideV = Math.min(14, d.slideV + 12 * dt);   // suction
+  d.slideU += d.slideV * dt / SLIDE_LEN;
+  if (d.slideU >= 1) {   // shoot off the end into the pool
+    const e = SLIDE.getPointAt(1), t = SLIDE.getTangentAt(1);
+    k.position.set(e.x + t.x * 0.5, e.y - 0.35, e.z + t.z * 0.5); d.vy = -1.5; d.slideU = undefined; d.slideCool = 1.5;
+    return false;
+  }
+  const p = SLIDE.getPointAt(d.slideU), t = SLIDE.getTangentAt(d.slideU);
+  k.position.set(p.x, p.y - SR + 0.12, p.z); d.yaw = Math.atan2(t.x, t.z); k.rotation.y = d.yaw;
+  d.body.rotation.x = -1.35; d.body.position.y = 0;
+  d.legL.rotation.x = d.legR.rotation.x = 0; d.armL.rotation.x = d.armR.rotation.x = -3.0;   // lying back feet first, arms up
+  d.tail.rotation.y = Math.sin(ctrlTime * 20) * 0.6;
+  hlRing.position.set(k.position.x, p.y - SR + 0.02, k.position.z);
+  return true;
+}
+function driveKid(k, dt) {
+  const d = k.userData; ctrlTime += dt;
+  if (rideSlide(k, dt)) { chaseCam(k, dt, false); return; }
+  // up/down = forward/back along the pup's heading, left/right = turn (the camera chases from behind)
+  const turn = (keys.has('ArrowLeft') ? 1 : 0) - (keys.has('ArrowRight') ? 1 : 0);
+  d.yaw += turn * 2.6 * dt;
+  const ahead = (keys.has('ArrowUp') ? 1 : 0) - (keys.has('ArrowDown') ? 0.6 : 0);
+  const mv = new THREE.Vector3(Math.sin(d.yaw), 0, Math.cos(d.yaw)).multiplyScalar(ahead);
+  const swimming = inPool(k.position.x, k.position.z) && k.position.y < 0.2;
+  const moving = mv.lengthSq() > 0 || turn !== 0;
+  if (mv.lengthSq() > 0) {
+    const back = ahead < 0; mv.normalize(); const run = keys.has('Shift'); const crawling = inTube(k.position);
+    const step = mv.clone().multiplyScalar((swimming ? (run ? 2.4 : 1.6) : crawling ? (run ? 2.6 : 1.8) : (run ? 7.0 : 3.6)) * dt);   // shift = run
+    if (!blocked(k.position, mv)) {
+      const nx = k.position.x + step.x, nz = k.position.z + step.z, f = floorAt(nx, k.position.y, nz);
+      if (f <= k.position.y + 0.5 || inPool(nx, nz)) { k.position.x = nx; k.position.z = nz; }
+    }
+    if (back) mv.multiplyScalar(0.6);
+  }
+  // gravity / water
+  const wasAbove = k.position.y > 0.05;
+  if (inPool(k.position.x, k.position.z)) {
+    const prevY = k.position.y; d.vy -= 9.8 * dt; k.position.y += d.vy * dt;
+    if (prevY > WY && k.position.y <= WY) splash(k.position.x, k.position.z, Math.min(2, 0.5 + Math.abs(d.vy) / 4));   // any entry through the surface splashes
+    if (k.position.y < -0.12) { k.position.y = -0.12; d.vy = 0; }
+  } else {
+    const f = floorAt(k.position.x, k.position.y, k.position.z);
+    d.vy -= 9.8 * dt; k.position.y += d.vy * dt;
+    if (k.position.y <= f) { k.position.y = f; d.vy = 0; }
+  }
+  const grounded = d.vy === 0;
+  const T = window.__tramp, onMat = grounded && Math.hypot(k.position.x - T.x, k.position.z - T.z) < T.r && Math.abs(k.position.y - T.y) < 0.08;
+  if (onMat) d.vy = keys.has(' ') ? 8.5 : 6.2;   // trampoline: bounces on its own, Space bounces higher
+  else if (keys.has(' ') && grounded) d.vy = swimming ? 3 : 4.2;
+  // pose
+  const crouch = inTube(k.position);
+  const sw = (swimming ? 1.35 : crouch ? 1.25 : 0);
+  d.body.position.y = crouch ? 0.3 : 0;
+  const running = moving && keys.has('Shift');
+  const swing = moving ? Math.sin(ctrlTime * (running ? 15 : 9)) * (running ? 0.95 : 0.6) : 0;
+  d.body.rotation.x = sw || (running ? 0.25 : 0);   // crouch/swim lean wins over run lean
+  k.rotation.y = d.yaw;                             // body faces the heading; forward/back move along it
+  const legs = swimming ? 1.2 : crouch ? 1.25 : 0, armsUp = swimming ? 2.6 + swing * 1.2 : crouch ? 1.25 + swing * 0.4 : (!grounded ? 2.7 : 0);
+  d.legL.rotation.x = -legs + swing; d.legR.rotation.x = -legs - swing;
+  d.armL.rotation.x = armsUp ? -armsUp : -swing * 0.9; d.armR.rotation.x = armsUp ? -armsUp : swing * 0.9;
+  d.tail.rotation.y = Math.sin(ctrlTime * 14) * 0.5;
+  hlRing.position.set(k.position.x, (swimming ? WY : k.position.y) + 0.03, k.position.z);
+  chaseCam(k, dt, swimming);
+}
+function chaseCam(k, dt, swimming) {
+  const d = k.userData;
+  // chase camera with its own smoothed state (no read-back from the camera, so no feedback jitter):
+  // character centred, camera behind it looking where its head looks; blockers fade (see updateFade)
+  const tgt = k.position.clone().add(new THREE.Vector3(0, swimming ? 0.3 : 0.9, 0));
+  if (!d.cam) { sph.setFromVector3(camera.position.clone().sub(controls.target)); d.cam = { theta: sph.theta, phi: sph.phi, radius: sph.radius, lift: 0 }; }
+  const C = d.cam;
+  controls.target.lerp(tgt, 1 - Math.exp(-6 * dt));
+  if (camDragging) return;   // the mouse is orbiting; OrbitControls owns the camera until release
+  d.lockT = Math.max(0, d.lockT - dt);
+  // camera stays behind the character and looks where its head looks (smoothly follows every turn)
+  const chase = true, a = 1 - Math.exp(-(d.lockT > 0 ? 4 : 6) * dt);
+  if (chase) { let dth = (d.yaw + Math.PI) - C.theta; dth = Math.atan2(Math.sin(dth), Math.cos(dth)); C.theta += dth * a; }
+  C.radius += (d.camDist - C.radius) * (1 - Math.exp(-3 * dt));
+  sph.set(C.radius, C.phi, C.theta);
+  const basePhi = C.base ?? 0.98;   // a mouse tilt sets the new resting angle; anything in the way fades instead
+  C.phi += (basePhi - C.phi) * (1 - Math.exp(-2 * dt));
+  sph.set(C.radius, C.phi, C.theta);
+  camera.position.copy(controls.target).add(new THREE.Vector3().setFromSpherical(sph));
+  camera.lookAt(controls.target);   // aim in the same step, no one-frame lag
+}
+// arrows orbit the camera when no pup is selected
+const sph = new THREE.Spherical();
+function orbitKeys(dt) {
+  if (!keys.size) return;
+  let dth = 0, dph = 0;
+  const fast = keys.has('Shift') ? 2.2 : 1;
+  if (keys.has('ArrowLeft')) dth -= 1.3 * fast * dt; if (keys.has('ArrowRight')) dth += 1.3 * fast * dt;
+  if (keys.has('ArrowUp')) dph -= 0.9 * fast * dt; if (keys.has('ArrowDown')) dph += 0.9 * fast * dt;
+  if (!dth && !dph) return;
+  const off = camera.position.clone().sub(controls.target); sph.setFromVector3(off);
+  sph.theta += dth; sph.phi = THREE.MathUtils.clamp(sph.phi + dph, controls.minPolarAngle, controls.maxPolarAngle);
+  off.setFromSpherical(sph); camera.position.copy(controls.target).add(off);
+}
+addEventListener('keydown', e => { if (e.key === 'Shift') keys.add('Shift'); if (e.key.startsWith('Arrow') || e.key === ' ') { e.preventDefault(); keys.add(e.key); } if (e.key === 'Escape') release(); });
+addEventListener('keyup', e => keys.delete(e.key));
+addEventListener('blur', () => keys.clear());
+let down = null;
+canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+canvas.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;   // a drag is an orbit, not a click
+  const r = canvas.getBoundingClientRect();
+  ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), camera); ray.far = Infinity;
+  const meshes = []; kids.forEach(k => k.traverse(o => { if (o.isMesh) { o.userData.kid = k; meshes.push(o); } }));
+  const hit = ray.intersectObjects(meshes, false)[0];
+  hit ? select(hit.object.userData.kid) : release();
+});
+function updateGate(dt) {   // swings open when a pup is near the foot of the stair, closes after
+  const G = window.__gate; if (!G) return;
+  const near = kids.some(k => k.position.y < 1.2 && Math.hypot(k.position.x - G.x, k.position.z - G.z) < 1.4);
+  G.open += ((near ? 1 : 0) - G.open) * Math.min(1, dt * 6); G.leaf.rotation.y = -G.open * 1.7;
+}
+// x-ray: whatever sits between the camera and the driven character fades to 25%, fast and smooth both ways
+const faded = new Map();   // mesh -> { orig, mat, a }
+let occluders = null;
+function updateFade(dt) {
+  const hitNow = new Set();
+  if (ctrl && groundMeshes) {
+    if (!occluders) occluders = groundMeshes.filter(m => m !== ground);
+    for (const h of [0.35, 0.9, 1.3]) {
+      const p = ctrl.position.clone(); p.y += h;
+      const dir = p.clone().sub(camera.position), dist = dir.length(); dir.normalize();
+      ray.set(camera.position, dir); ray.far = dist - 0.35;
+      ray.intersectObjects(occluders, false).forEach(x => hitNow.add(x.object));
+    }
+  }
+  hitNow.forEach(m => { if (!faded.has(m)) { const mat = m.material.clone(); mat.transparent = true; mat.depthWrite = false; faded.set(m, { orig: m.material, mat, a: 1 }); m.material = mat; } });
+  const k = 1 - Math.exp(-14 * dt);
+  faded.forEach((f, m) => {
+    const target = hitNow.has(m) ? 0.25 : 1; f.a += (target - f.a) * k; f.mat.opacity = f.a;
+    if (target === 1 && f.a > 0.985) { m.material = f.orig; f.mat.dispose(); faded.delete(m); }
+  });
+}
+const updateKids = dt => { kidTime += dt; updateFade(dt); updateSplash(dt); updateGate(dt); updateBubbles(dt);
+  kids.forEach((k, i) => k === ctrl ? driveKid(k, dt) : updateKid(k, kidTime + i * LOOP / 3));
+  if (!ctrl) orbitKeys(dt); };
+
+/* ---------- head icons, top-left: rendered once from each character's own model ---------- */
+const headBtns = [];
+function syncHeads() { headBtns.forEach((b, i) => b.classList.toggle('on', kids[i] === ctrl)); }
+(function makeHeads() {
+  const S = 128, rt = new THREE.WebGLRenderTarget(S, S), ts = new THREE.Scene();
+  ts.add(new THREE.HemisphereLight(0xffffff, 0xb8b29c, 1.6)); const dl = new THREE.DirectionalLight(0xffffff, 1.2); dl.position.set(1, 2, 3); ts.add(dl);
+  const cam = new THREE.PerspectiveCamera(28, 1, 0.05, 10); cam.position.set(0.18, 1.2, 0.95); cam.lookAt(0, 1.14, 0);
+  const res = LINE.resolution.clone(); [LINE, LINE_SOFT].forEach(m => m.resolution.set(S, S));
+  const px = new Uint8Array(S * S * 4), c2 = document.createElement('canvas'); c2.width = c2.height = S; const g2 = c2.getContext('2d');
+  const wrap = document.getElementById('heads'), names = ['Piglet', 'Monkey', 'Pup'];
+  kids.forEach((k, i) => {
+    const ud = k.userData; k.userData = {};   // clone() JSON-copies userData, which holds limb refs
+    const c = k.clone(true); k.userData = ud;
+    c.position.set(0, 0, 0); c.rotation.set(0, 0, 0); c.traverse(o => { if (o.isGroup) o.rotation.set(0, 0, 0); }); ts.add(c);
+    renderer.setRenderTarget(rt); renderer.setClearColor(0xf3f0e9, 1); renderer.clear(); renderer.render(ts, cam); renderer.readRenderTargetPixels(rt, 0, 0, S, S, px); renderer.setRenderTarget(null);
+    ts.remove(c);
+    const img = g2.createImageData(S, S); for (let y = 0; y < S; y++) img.data.set(px.subarray((S - 1 - y) * S * 4, (S - y) * S * 4), y * S * 4); g2.putImageData(img, 0, 0);
+    const b = document.createElement('button'); b.title = names[i]; b.setAttribute('aria-label', 'Control ' + names[i]);
+    const im = new Image(); im.src = c2.toDataURL(); im.alt = ''; b.appendChild(im);
+    b.addEventListener('click', e => { e.stopPropagation(); ctrl === k ? release() : select(k); b.blur(); });
+    wrap.appendChild(b); headBtns.push(b);
+  });
+  renderer.setClearColor(scene.background, 1); [LINE, LINE_SOFT].forEach(m => m.resolution.copy(res)); rt.dispose();
+})();
+
+/* ---------- own wheel zoom (from building-3d-widget: stock zoom feels dead on retina/pinch) ---------- */
+controls.enableZoom = false;
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  const k = e.ctrlKey ? 0.014 : 0.0028;
+  const off = camera.position.clone().sub(controls.target);
+  off.setLength(THREE.MathUtils.clamp(off.length() * Math.exp(dy * k), controls.minDistance, controls.maxDistance));
+  camera.position.copy(controls.target).add(off);
+  if (ctrl) { ctrl.userData.camDist = off.length(); if (ctrl.userData.cam) ctrl.userData.cam.radius = off.length(); }
+}, { passive: false });
+
+/* ---------- resize + loop with pixel-ratio governor, shadows every other frame ---------- */
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h;
+  [LINE, LINE_SOFT, LINE_HL].forEach(m => m.resolution.set(w, h));
+  camera.fov = w / h < 16 / 9 ? 32 * Math.min(1.6, (16 / 9) / (w / h)) : 32;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+window.__v = { camera, controls, scene, renderer, updateKids, kids, LOOP, select, release, keys, get ctrl() { return ctrl; }, blocked, floorAt, inTube, get walls() { return wallMeshes; } };
+const clock = new THREE.Clock();
+let pf = 0, pt = 0, shadowTick = false;
+renderer.setAnimationLoop(() => {
+  const raw = clock.getDelta();
+  if (!document.hidden) { pf++; pt += raw; if (pt >= 1) { if (pt / pf > 1 / 45 && pixelRatio > 1) { pixelRatio = Math.max(1, pixelRatio - 0.25); renderer.setPixelRatio(pixelRatio); resize(); } pf = 0; pt = 0; } }
+  controls.update();
+  updateKids(Math.min(raw, 0.05));
+  shadowTick = !shadowTick; renderer.shadowMap.needsUpdate = shadowTick;
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
