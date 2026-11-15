@@ -30,7 +30,9 @@
     opacity: 0; visibility: hidden; transition: opacity 120ms, visibility 120ms; -webkit-font-smoothing: antialiased; }
   #credit a { color: inherit; }
   #creditWrap:hover #credit, #creditWrap:focus-within #credit, #creditWrap.open #credit { opacity: 1; visibility: visible; }
-  @media (max-width: 520px) { body:has(#arrows:not([hidden])) #creditWrap { bottom: calc(136px + env(safe-area-inset-bottom)); } }   /* phones: sit above the on-screen controls while playing */
+  /* phones: no © button; the music credit rides along on the intro card instead (CC BY needs a credit somewhere) */
+  #intro .credit { display: none; }
+  @media (max-width: 520px) { #creditWrap { display: none; } #intro .credit { display: block; margin-top: 10px; font: 600 10px/1.35 -apple-system, system-ui, sans-serif; letter-spacing: 0; color: #6b6760; } }
   #exit { position: fixed; z-index: 3; top: calc(14px + env(safe-area-inset-top)); right: calc(14px + env(safe-area-inset-right)); width: 50px; height: 50px; padding: 0;
     border: 4px solid #1a1a1a; border-radius: 50%; background: #fff; box-shadow: 0 4px 0 #1a1a1a; cursor: pointer; display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
   #exit:active { transform: translateY(3px); box-shadow: 0 1px 0 #1a1a1a; }
@@ -71,7 +73,7 @@
 <div id="heads" class="pulse"></div>
 <div id="creditWrap"><div id="credit" role="tooltip">Music: “Monkeys Spinning Monkeys” by Kevin MacLeod (<a href="https://incompetech.com" target="_blank" rel="noopener">incompetech.com</a>), CC BY 4.0</div><button id="creditBtn" aria-label="Music credit" aria-describedby="credit">©</button></div>
 <button id="exit" hidden aria-label="Stop playing this character"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 4 L16 16 M16 4 L4 16" stroke="#1a1a1a" stroke-width="3.6" stroke-linecap="round"/></svg></button>
-<div id="intro"><div class="card">Select a <b>character</b><br>and play!<small>TAP A HEAD UP HERE ↖</small></div></div>
+<div id="intro"><div class="card">Select a <b>character</b><br>and play!<small>TAP A HEAD UP HERE ↖</small><span class="credit">Music: “Monkeys Spinning Monkeys” by Kevin MacLeod (incompetech.com), CC BY 4.0</span></div></div>
 <svg id="introArrow" viewBox="0 0 64 64" aria-hidden="true"><path d="M50 54 C 44 34, 34 22, 14 14" fill="none" stroke="#1a1a1a" stroke-width="6" stroke-linecap="round"/><path d="M12 30 L 12 12 L 30 10" fill="none" stroke="#1a1a1a" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
 <div id="arrows" class="pad" hidden><button class="cap" data-key="ArrowUp" aria-label="Forward"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(0 10 10)"/></svg></button><button class="cap" data-key="ArrowLeft" aria-label="Turn left"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(-90 10 10)"/></svg></button><button class="cap" data-key="ArrowDown" aria-label="Back"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(180 10 10)"/></svg></button><button class="cap" data-key="ArrowRight" aria-label="Turn right"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3.5 L17 15.5 Q17.6 16.6 16.3 16.6 L3.7 16.6 Q2.4 16.6 3 15.5 Z" fill="#1a1a1a" transform="rotate(90 10 10)"/></svg></button></div>
 <div id="actions" class="pad" hidden><button class="cap round" data-key="Shift" aria-label="Run (hold)">RUN</button><button class="cap round" data-key=" " aria-label="Jump">JUMP</button></div>
