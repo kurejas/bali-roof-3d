@@ -30,9 +30,12 @@
     opacity: 0; visibility: hidden; transition: opacity 120ms, visibility 120ms; -webkit-font-smoothing: antialiased; }
   #credit a { color: inherit; }
   #creditWrap:hover #credit, #creditWrap:focus-within #credit, #creditWrap.open #credit { opacity: 1; visibility: visible; }
-  /* phones: no © button; the music credit rides along on the intro card instead (CC BY needs a credit somewhere) */
+  /* phones: the © is just a small plain text link (no circle); tap it for the credit tooltip */
   #intro .credit { display: none; }
-  @media (max-width: 520px) { #creditWrap { display: none; } #intro .credit { display: block; margin-top: 10px; font: 600 10px/1.35 -apple-system, system-ui, sans-serif; letter-spacing: 0; color: #6b6760; } }
+  @media (max-width: 520px) {
+    #creditBtn { width: auto; height: auto; padding: 6px 8px; border: 0; border-radius: 0; background: none; box-shadow: none; color: #55524b; font: 600 12px/1 -apple-system, system-ui, sans-serif; }
+    body:has(#arrows:not([hidden])) #creditWrap { bottom: calc(132px + env(safe-area-inset-bottom)); }   /* above the on-screen controls while playing */
+  }
   #exit { position: fixed; z-index: 3; top: calc(14px + env(safe-area-inset-top)); right: calc(14px + env(safe-area-inset-right)); width: 50px; height: 50px; padding: 0;
     border: 4px solid #1a1a1a; border-radius: 50%; background: #fff; box-shadow: 0 4px 0 #1a1a1a; cursor: pointer; display: flex; align-items: center; justify-content: center; touch-action: manipulation; }
   #exit:active { transform: translateY(3px); box-shadow: 0 1px 0 #1a1a1a; }
